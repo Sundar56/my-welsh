@@ -25,9 +25,9 @@ return new class extends Migration
             $table->tinyInteger('is_cancelled')->default(0);
             $table->tinyInteger('is_trail')->default(0);
             $table->tinyInteger('is_customer')->default(0);
-            $table->enum('payment_type', ['0', '1'])
+            $table->enum('payment_type', ['0', '1', '2'])
                 ->default('0')
-                ->comment('0 - card, 1 - bacs');
+                ->comment('0 - card, 1 - bacs, 2 - parent');
             $table->rememberToken();
             $table->timestamps();
             $table->softDeletes();

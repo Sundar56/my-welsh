@@ -12,4 +12,8 @@ Route::group([
 ], function () {
     Route::get('/admin/viewprofile', 'AdminSettingController@adminViewProfile')->name('admin.settings.view');
     Route::post('/admin/editprofile', 'AdminSettingController@adminEditProfile')->name('admin.settings.edit');
+
+    Route::post('/admin/createsettings', 'AdminSettingController@createSettings')->name('admin.settings.createsettings');
+    Route::post('/admin/viewsettings', 'AdminSettingController@viewAdminSettings')->name('admin.settings.viewsettings');
+    Route::post('/admin/editsettings', 'AdminSettingController@editAdminSettings')->name('admin.settings.editsettings');
 });

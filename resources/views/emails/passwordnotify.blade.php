@@ -52,7 +52,7 @@
             display: inline-block;
             margin-top: 20px;
             padding: 12px 28px;
-            background-color: #ED6D1B;
+            background-color: #683BB4;
             color: #ffffff;
             text-decoration: none;
             border-radius: 30px;
@@ -92,6 +92,27 @@
             <p><strong>Email:</strong> {{ $data['email'] ?? '-' }}</p>
             <p><strong>Password:</strong> {{ $data['password'] ?? '-' }}</p>
             <p>Please keep this information secure. You can now access your dashboard using the button below.</p>
+
+            @elseif($data['emailType'] == 'activate')
+            <h2>Hello,</h2>
+            <p>Thank you for registering with us. Your account has been successfully activated!</p>
+            <p>You can now explore and access all the resources and features available to you based on your current subscription plan.</p>
+
+            @elseif($data['emailType'] == 'cancelled')
+            <h2>Hi,</h2>
+            <p>We're confirming that your subscription {{ $data['resourceName'] ?? '-' }} has been successfully cancelled.</p>
+            <p>Your access will remain active until {{ $data['endDate'] ?? '-' }}, after which your account will no longer be billed.</p>
+            <p>You’re always welcome back — we’ll be here if you decide to return.</p>
+
+            @elseif($data['emailType'] == 'subscription')
+            <h2>Hi,</h2>
+            <p>This is a reminder that your {{ $data['resourceName'] ?? '-' }} subscription, which was valid until {{ $data['endDate'] ?? '-' }}, has now expired. Unfortunately, you no longer have access to your subscription resources.</p>
+            <p>If you'd like to continue enjoying our services, we encourage you to renew your subscription. You can do so easily by visiting your account page or following the link below:</p>
+
+            @elseif($data['emailType'] == 'trail')
+            <h2>Hello,</h2>
+            <p>Your trial period has ended. Please consider upgrading your account to continue using our services.</p>
+
             @else
             <h2>Password Reset Successful</h2>
             <p>Hello,</p>
@@ -104,7 +125,7 @@
             </div>
             <p>We recommend changing this password after logging in for security reasons.</p>
             @endif
-            <a href="https://ffalala.sitecare.org/login" class="button">Login</a>
+            <a href="{{ $data['redirectLogin'] ?? '-' }}" style="color: #ffffff !important;" class="button">Login</a>
         </div>
         <div class="footer">
             &copy; {{ date('Y') }} Ffa-la-la. All rights reserved.

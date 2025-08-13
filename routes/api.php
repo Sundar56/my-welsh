@@ -6,15 +6,15 @@ use Illuminate\Support\Facades\Route;
 use Illuminate\Support\Facades\URL;
 
 $proxy_enabled = getenv('PROXY_ENABLED');
-if (! empty($proxy_enabled) && $proxy_enabled === true) {
+if (isset($proxy_enabled) && $proxy_enabled === true) {
     $proxy_url = getenv('PROXY_URL');
     $proxy_schema = getenv('PROXY_SCHEMA');
 
-    if (! empty($proxy_url)) {
+    if (isset($proxy_url) && $proxy_url !== '') {
         URL::forceRootUrl($proxy_url);
     }
 
-    if (! empty($proxy_schema)) {
+    if (isset($proxy_schema) && $proxy_schema !== '') {
         URL::forceScheme($proxy_schema);
     }
 }

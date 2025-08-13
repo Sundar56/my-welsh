@@ -8,7 +8,9 @@ use App\Api\Admin\Modules\Resources\Models\Resources;
 use App\Http\Controllers\Api\BaseController;
 use App\Models\ModelHasRoles;
 use App\Models\Modules;
+use App\Models\TrailHistory;
 use App\Models\User;
+use App\Models\UserSubscription;
 use App\Traits\TransactionWrapper;
 use Illuminate\Http\Request;
 
@@ -37,23 +39,23 @@ class DashboardController extends BaseController
     /**
      * Display the admin dashboard data.
      *
+     * @param \Illuminate\Http\Request $request The incoming HTTP request instance.
+     *
      * @return \Illuminate\Http\JsonResponse The JSON response containing dashboard statistics.
      */
-    public function adminDashboard()
+    public function adminDashboard(Request $request)
     {
-        return $this->runInTransaction(function () {
+        return $this->runInTransaction(function () use ($request) {
             $users = $this->getUserStatistics();
             $resources = $this->getResourceStatistics();
+            $sales = $this->getSalesStatistics();
             $data = [
                 'users' => $users,
                 'resources' => $resources,
-                'sales' => [
-                    'totalCount' => '£0.00',
-                    'lastMonthCount' => '£0.00',
-                ],
+                'sales' => $sales,
             ];
-
-            return $this->sendResponse($data, 'Admin dashboard data fetched successfully');
+            $lang = $request->query('language', 'en');
+            return $this->sendResponse($data, trans('message.success.dashboard_success', [], $lang));
         });
     }
     /**
@@ -84,13 +86,39 @@ class DashboardController extends BaseController
     {
         $now = now();
         $lastMonth = $now->copy()->subMonth();
-        $totalResources = Resources::count();
-        $newResourcesLastMonth = Resources::whereBetween('created_at', [$lastMonth, $now])
+        $totalResources = Resources::where('type', '!=', TrailHistory::TRAIL)->count();
+        $newResourcesLastMonth = Resources::where('type', '!=', TrailHistory::TRAIL)->whereBetween('created_at', [$lastMonth, $now])
             ->count();
 
         return [
             'totalCount' => $totalResources,
             'lastMonthCount' => $newResourcesLastMonth,
+        ];
+    }
+    /**
+     * Calculate subscription sales statistics.
+     *
+     * Retrieves the total subscription sales amount and the sales amount
+     * generated within the last month from active and latest subscriptions.
+     *
+     * @return array
+     */
+    private function getSalesStatistics(): array
+    {
+        $now = now();
+        $lastMonth = $now->copy()->subMonth();
+        $query = UserSubscription::leftJoin('subscription_history', 'user_subscription.id', '=', 'subscription_history.type_id')
+            ->where('user_subscription.latest_subscription', UserSubscription::STATUS_ONE)
+            ->where('user_subscription.status', UserSubscription::STATUS_ONE);
+
+        $totalSalesAmount = $query->sum('subscription_history.subscription_amount');
+        $newSalesThisMonth = $query
+            ->where('subscription_history.created_at', '>=', $lastMonth)
+            ->sum('subscription_history.subscription_amount');
+
+        return [
+            'totalCount' => '£' . number_format($totalSalesAmount, 2),
+            'lastMonthCount' => '£' . number_format($newSalesThisMonth, 2),
         ];
     }
 }

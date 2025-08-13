@@ -23,5 +23,6 @@ class SubscriptionHistory extends Model
         'subscription_end_date',
         'subscription_duration',
         'fee_type',
+        'expiry_mail',
     ];
 }

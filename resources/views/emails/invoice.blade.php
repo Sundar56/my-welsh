@@ -64,7 +64,7 @@
             display: inline-block;
             margin-top: 25px;
             padding: 12px 28px;
-            background-color: #ED6D1B;
+            background-color: #683BB4;
             color: #ffffff;
             text-decoration: none;
             border-radius: 30px;
@@ -139,7 +139,7 @@
             </div>
 
             <p>Click the button below to login:</p>
-            <a href="https://ffalala.sitecare.org/login" class="button">Login</a>
+            <a href="{{$data['redirectLogin'] ?? '-'}}" style="color: #ffffff !important;" class="button">Login</a>
         </div>
 
         <div class="footer">

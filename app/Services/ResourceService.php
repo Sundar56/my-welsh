@@ -7,7 +7,6 @@ namespace App\Services;
 use App\Api\Admin\Modules\Resources\Models\ModuleResources;
 use App\Api\Admin\Modules\Resources\Models\ModuleResourceTopic;
 use App\Api\Admin\Modules\Resources\Models\Resources;
-use App\Models\ModelHasRoles;
 use App\Models\UserSubscription;
 use App\Traits\ApiResponse;
 use App\Traits\TransactionWrapper;
@@ -44,8 +43,9 @@ class ResourceService
             if ($uploadError) {
                 return $uploadError;
             }
+            $lang = $request->language ?? 'en';
 
-            return $this->successResponse(null, 'Resource with modules and topics created successfully');
+            return $this->successResponse(null, trans('message.success.resource_created', [], $lang));
         });
     }
     /**
@@ -61,6 +61,7 @@ class ResourceService
             'resource_name' => $request->resource_name,
             'monthly_fee' => $request->monthly_amount,
             'annual_fee' => $request->annual_amount,
+            'type' => Resources::DEFAULT,
         ]);
 
         return [
@@ -85,10 +86,12 @@ class ResourceService
                 'resourceName' => $resource->resource_name,
                 'monthlyAmount' => $resource->monthly_fee,
                 'annualAmount' => $resource->annual_fee,
+                'topicTypeMap' => config('custom.topic_type'),
             ];
             $data = array_merge($resourceInfo, $modulesWithTopics);
+            $lang = $request->language ?? 'en';
 
-            return $this->successResponse($data, 'Resource details');
+            return $this->successResponse($data, trans('message.success.resource_details', [], $lang));
         });
     }
     /**
@@ -125,17 +128,18 @@ class ResourceService
     public function editResource(Request $request): ?array
     {
         return $this->runInTransaction(function () use ($request) {
-            $validationErrors = $this->validateResource($request);
-            if ($validationErrors) {
-                return $this->validationErrorResponse($validationErrors);
-            }
-            $this->updateResource($request);
+            // $validationErrors = $this->validateResource($request);
+            // if ($validationErrors) {
+            //     return $this->validationErrorResponse($validationErrors);
+            // }
+            // $this->updateResource($request);
             $uploadError = $this->updateModulesAndTopics($request->modules);
             if ($uploadError) {
                 return $uploadError;
             }
+            $lang = $request->language ?? 'en';
 
-            return $this->successResponse(null, 'Resource with modules and topics updated successfully');
+            return $this->successResponse(null, trans('message.success.resource_updated', [], $lang));
         });
     }
     /**
@@ -150,40 +154,14 @@ class ResourceService
         return $this->runInTransaction(function () use ($request) {
             $topicId = $this->decryptedValues($request->topic_id);
             $topic = ModuleResourceTopic::find($topicId);
+            $lang = $request->language ?? 'en';
 
             if (! $topic) {
-                return $this->failedResponse('Topic not found');
+                return $this->failedResponse(trans('message.error.no_subscription', [], $lang));
             }
             $topic->delete();
 
-            return $this->successResponse(null, 'Topic deleted successfully');
-        });
-    }
-    /**
-     * Retrieves all modules and topics for a user's subscribed resources.
-     * Handles both single and multiple resource cases and returns a formatted response.
-     *
-     * @param int $userId
-     *
-     * @return array
-     */
-    public function allModulesList($userId)
-    {
-        return $this->runInTransaction(function () use ($userId) {
-            if ($this->isAdminUser($userId)) {
-                $resources = Resources::select('id as resource_id', 'resource_name')->get();
-                $data = $this->formatMultipleResources($resources);
-            } else {
-                $resource = UserSubscription::where('user_id', $userId)
-                    ->select('resource_id')
-                    ->first();
-                if (! $resource) {
-                    return $this->failedResponse('No subscription found for the user.');
-                }
-                $data = $this->formatSingleResource($resource->resource_id);
-            }
-
-            return $this->successResponse($data, 'Modules with Topics List');
+            return $this->successResponse(null, trans('message.success.topic_deleted', [], $lang));
         });
     }
     /**
@@ -212,6 +190,67 @@ class ResourceService
         ];
     }
     /**
+     * Get all modules list for a user within a database transaction.
+     *
+     * @param int|string $userId The ID of the user.
+     *
+     * @return mixed The result of the transactional modules list retrieval.
+     */
+    public function allModulesList($userId)
+    {
+        return $this->runInTransaction(function () use ($userId) {
+            return $this->getModulesListForUser($userId);
+        });
+    }
+    /**
+     * Handle edit resource with module name.
+     *
+     * @param Request $request
+     *
+     * @return array
+     */
+    public function editResourceNew(Request $request): array
+    {
+        return $this->runInTransaction(function () use ($request) {
+            $lang = $request->language ?? 'en';
+            $resourceId = $this->decryptedValues($request->resource_id);
+            $moduleIdEncrypted = $request->moduleId ?? null;
+            $moduleName = $request->moduleName ?? null;
+            $decryptedModuleId = $moduleIdEncrypted ? $this->decryptedValues($moduleIdEncrypted) : null;
+            $modules = $request->modules;
+
+            $moduleId = $this->createOrUpdateModule($decryptedModuleId, $moduleName, $resourceId);
+
+            foreach ($modules as $moduleData) {
+                $this->updateTopicsNew($moduleData['resources'] ?? [], $moduleId);
+            }
+            return $this->successResponse(null, trans('message.success.resource_updated', [], $lang));
+        });
+    }
+    /**
+     * Delete the specified resource topic based on the incoming request data.
+     *
+     * @param \Illuminate\Http\Request $request  The HTTP request containing the topic ID or related data.
+     *
+     * @return array
+     */
+    public function deleteTopicFile(Request $request): array
+    {
+        return $this->runInTransaction(function () use ($request) {
+            $topicId = $this->decryptedValues($request->topic_id);
+            $topic = ModuleResourceTopic::find($topicId);
+            $lang = $request->language ?? 'en';
+
+            if (! $topic) {
+                return $this->failedResponse(trans('message.error.no_subscription', [], $lang));
+            }
+            $topic->resource_path = null;
+            $topic->save();
+
+            return $this->successResponse(null, trans('message.success.topic_deleted', [], $lang));
+        });
+    }
+    /**
      * Processes all modules and their respective topics and files.
      *
      * @param array $modules The list of module data.
@@ -221,16 +260,11 @@ class ResourceService
      */
     protected function handleModulesAndTopics(array $modules, int $resourceId): ?array
     {
-        foreach ($modules as $moduleData) {
-            $module = $this->createModule($moduleData, $resourceId);
-            foreach ($moduleData['resources'] as $topicData) {
-                $uploadError = $this->createTopicAndUploadFiles($module['moduleId'], $topicData);
-                if ($uploadError) {
-                    return $uploadError;
-                }
-            }
-        }
-        return null;
+        return $this->processModulesAndTopics(
+            $modules,
+            fn ($moduleData) => $this->createModule($moduleData, $resourceId),
+            fn ($moduleId, $topicData) => $this->createTopicAndUploadFiles($moduleId, $topicData)
+        );
     }
     /**
      * Create a module using the provided module data and resource ID.
@@ -256,27 +290,6 @@ class ResourceService
         ];
     }
     /**
-     * Creates a topic and uploads files if needed.
-     *
-     * @param int $moduleId The ID of the module to associate with the topic.
-     * @param array $topicData The data for the topic.
-     *
-     * @return array|null Returns an array of upload errors if any occurred, otherwise null.
-     */
-    protected function createTopicAndUploadFiles(int $moduleId, array $topicData): ?array
-    {
-        $topicRequest = $this->buildTopicRequest($topicData, $moduleId);
-        $resourceTopic = $this->createResourceTopic($topicRequest, $moduleId);
-
-        if ($topicRequest->resource_type !== 0 && $resourceTopic) {
-            $uploadError = $this->uploadFileService->uploadReourceFiles($topicRequest, $resourceTopic['topicId']);
-            if ($uploadError) {
-                throw new \Exception('File upload failed');
-            }
-        }
-        return null;
-    }
-    /**
      * Build a request object for creating or updating a topic.
      *
      * @param array $topicData
@@ -293,37 +306,8 @@ class ResourceService
             'resource_type' => $topicData['type'],
             'video_url' => $topicData['video_url'] ?? '',
             'resource_file' => $topicData['resource_file'] ?? '',
-            'topic_id' => $topicData['topic_id'] ?? '',
+            'topic_id' => $topicData['topic_id'] ?? null,
         ]);
-    }
-    /**
-     * Get the integer resource type ID based on the given resource type string.
-     *
-     * @param string $type
-     *
-     * @return int
-     */
-    protected function getResourceType(string $type): int
-    {
-        return match (strtolower($type)) {
-            'video' => 0,
-            'pdf' => 1,
-            'mp3' => 2,
-            default => 0,
-        };
-    }
-    /**
-     * Checks if the given user has the ADMIN role.
-     *
-     * @param int $userId
-     *
-     * @return bool
-     */
-    protected function isAdminUser(int $userId): bool
-    {
-        return ModelHasRoles::where('model_id', $userId)
-            ->where('role_id', ModelHasRoles::ADMIN)
-            ->exists();
     }
     /**
      * Formats data for a single resource ID.
@@ -378,16 +362,11 @@ class ResourceService
      */
     protected function updateModulesAndTopics(array $modules): ?array
     {
-        foreach ($modules as $moduleData) {
-            $module = $this->updateModules($moduleData);
-            foreach ($moduleData['resources'] as $topicData) {
-                $uploadError = $this->updateTopicAndUploadFiles($module['moduleId'], $topicData);
-                if ($uploadError) {
-                    return $uploadError;
-                }
-            }
-        }
-        return null;
+        return $this->processModulesAndTopics(
+            $modules,
+            fn ($moduleData) => $this->updateModules($moduleData),
+            fn ($moduleId, $topicData) => $this->updateTopicAndUploadFiles($moduleId, $topicData)
+        );
     }
     /**
      * Update a module using the provided module data and resource ID.
@@ -398,32 +377,58 @@ class ResourceService
      */
     protected function updateModules(array $moduleData): array
     {
-        $moduleRequest = new Request([
-            'module_name' => $moduleData['moduleName'],
-            'module_id' => $moduleData['moduleId'],
-        ]);
-        $moduleId = $this->decryptedValues($moduleRequest->module_id);
+        $moduleName = $moduleData['moduleName'] ?? null;
+        $moduleIdEncrypted = $moduleData['moduleId'] ?? null;
+        $moduleId = $moduleIdEncrypted ? $this->decryptedValues($moduleIdEncrypted) : null;
 
-        ModuleResources::where('id', $moduleId)->update([
-            'module_name' => $moduleRequest->module_name,
-        ]);
+        $module = $moduleId
+            ? tap(ModuleResources::find($moduleId))->update(['module_name' => $moduleName])
+            : ModuleResources::create(['module_name' => $moduleName]);
 
         return [
-            'moduleId' => $moduleId,
+            'moduleId' => $module->id,
         ];
     }
     /**
-     * Creates a topic and uploads files if needed.
+     * Processes an array of modules and their topics.
      *
-     * @param int $moduleId The ID of the module to associate with the topic.
-     * @param array $topicData The data for the topic.
+     * @param array $modules An array of modules where each module contains its data and topics (resources).
+     * @param callable $moduleHandler A callable function or method to handle the module creation or update.
+     *                                It receives the module data as an argument.
+     * @param callable $topicHandler A callable function or method to handle the topic creation or update, and file uploads.
+     *                                It receives the module ID and topic data as arguments.
      *
-     * @return array|null Returns an array of upload errors if any occurred, otherwise null.
+     * @return array|null Returns null if all modules and topics are processed successfully.
+     *                   Returns an array representing the error if any occurs during topic processing.
      */
-    protected function updateTopicAndUploadFiles(int $moduleId, array $topicData): ?array
+    protected function processModulesAndTopics(array $modules, callable $moduleHandler, callable $topicHandler): ?array
+    {
+        foreach ($modules as $moduleData) {
+            $module = $moduleHandler($moduleData);
+            foreach ($moduleData['resources'] as $topicData) {
+                $uploadError = $topicHandler($module['moduleId'], $topicData);
+                if ($uploadError) {
+                    return $uploadError;
+                }
+            }
+        }
+        return null;
+    }
+    /**
+     * Creates or updates a topic and uploads associated files.
+     *
+     * @param int $moduleId The ID of the module to which the topic belongs.
+     * @param array $topicData The data for the topic, including any associated files.
+     * @param bool $isCreate Flag to determine whether the operation is creating (true) or updating (false) a topic.
+     *
+     * @return array|null Returns null if the operation is successful. If an error occurs, an exception will be thrown.
+     */
+    protected function processTopicAndUploadFiles(int $moduleId, array $topicData, bool $isCreate): ?array
     {
         $topicRequest = $this->buildTopicRequest($topicData, $moduleId);
-        $resourceTopic = $this->updateResourceTopic($topicRequest, $moduleId);
+        $resourceTopic = $isCreate
+            ? $this->createResourceTopic($topicRequest, $moduleId)
+            : $this->updateResourceTopic($topicRequest, $moduleId);
 
         if ($topicRequest->resource_type !== 0 && $resourceTopic) {
             $uploadError = $this->uploadFileService->uploadReourceFiles($topicRequest, $resourceTopic['topicId']);
@@ -432,6 +437,134 @@ class ResourceService
             }
         }
         return null;
+    }
+    /**
+     * Creates a topic and uploads associated files.
+     *
+     * @param int $moduleId The ID of the module to which the topic belongs.
+     * @param array $topicData The data for the topic, including any associated files.
+     *
+     * @return array|null Returns null if the creation and file upload are successful. If an error occurs, an exception is thrown.
+     */
+    protected function createTopicAndUploadFiles(int $moduleId, array $topicData): ?array
+    {
+        return $this->processTopicAndUploadFiles($moduleId, $topicData, true);
+    }
+    /**
+     * Updates a topic and uploads associated files.
+     *
+     * @param int $moduleId The ID of the module to which the topic belongs.
+     * @param array $topicData The data for the topic, including any associated files.
+     *
+     * @return array|null Returns null if the update and file upload are successful. If an error occurs, an exception is thrown.
+     */
+    protected function updateTopicAndUploadFiles(int $moduleId, array $topicData): ?array
+    {
+        return $this->processTopicAndUploadFiles($moduleId, $topicData, false);
+    }
+    /**
+     * Creates a new module or updates an existing one with the given name and resource ID.
+     *
+     * @param int|null $moduleId The ID of the module to update, or null to create a new module.
+     * @param string $moduleName The name of the module.
+     * @param int $resourceId The ID of the resource to associate with the module.
+     *
+     * @return int The ID of the created or updated module.
+     */
+    protected function createOrUpdateModule(?int $moduleId, string $moduleName, int $resourceId): int
+    {
+        if ($moduleId && ($module = ModuleResources::find($moduleId))) {
+            $module->update(['module_name' => $moduleName]);
+            return $module->id;
+        }
+
+        $module = ModuleResources::create([
+            'module_name' => $moduleName,
+            'resource_id' => $resourceId,
+        ]);
+
+        return $module->id;
+    }
+    /**
+     * Updates the topics for a given module with the provided resources.
+     *
+     * @param array $resources An array of resource data to update the topics with.
+     * @param int $moduleId The ID of the module whose topics are being updated.
+     *
+     * @return void
+     */
+    protected function updateTopicsNew(array $resources, int $moduleId): void
+    {
+        foreach ($resources as $resource) {
+            $this->processSingleResource($resource, $moduleId);
+        }
+    }
+    /**
+     * Process a single resource: create or update topic, and upload files if needed.
+     *
+     * @param array $resource
+     * @param int $moduleId
+     *
+     * @return void
+     *
+     * @throws \Exception
+     */
+    private function processSingleResource(array $resource, int $moduleId): void
+    {
+        $topicRequest = $this->buildTopicRequest($resource, $moduleId);
+
+        $resourceTopic = $this->handleResourceTopic($resource, $topicRequest, $moduleId);
+
+        if ($this->requiresFileUpload($topicRequest, $resourceTopic)) {
+            $this->handleFileUpload($topicRequest, $resourceTopic['topicId']);
+        }
+    }
+
+    /**
+     * Create or update the resource topic based on presence of topic_id.
+     *
+     * @param array $resource
+     * @param mixed $topicRequest
+     * @param int $moduleId
+     *
+     * @return mixed
+     */
+    private function handleResourceTopic(array $resource, $topicRequest, int $moduleId)
+    {
+        if (! isset($resource['topic_id']) || $resource['topic_id'] === null || $resource['topic_id'] === '') {
+            return $this->createResourceTopic($topicRequest, $moduleId);
+        }
+
+        return $this->updateResourceTopic($topicRequest, $moduleId);
+    }
+
+    /**
+     * Determine if a file upload is required.
+     *
+     * @param mixed $topicRequest
+     * @param mixed $resourceTopic
+     *
+     * @return bool
+     */
+    private function requiresFileUpload($topicRequest, $resourceTopic): bool
+    {
+        return (int) $topicRequest->resource_type !== 0 && $resourceTopic;
+    }
+    /**
+     * Handle the file upload and throw if it fails.
+     *
+     * @param mixed $topicRequest
+     * @param int $topicId
+     *
+     * @throws \Exception
+     */
+    private function handleFileUpload($topicRequest, int $topicId): void
+    {
+        $uploadError = $this->uploadFileService->uploadReourceFiles($topicRequest, $topicId);
+
+        if ($uploadError) {
+            throw new \Exception('File upload failed');
+        }
     }
     /**
      * Retrieve and format modules related to a given resource ID.
@@ -499,11 +632,12 @@ class ResourceService
      */
     private function validateResource(Request $request): ?array
     {
+        $lang = $request->language ?? 'en';
         $rules = [
             'resource_name' => 'required',
         ];
         $messages = [
-            'resource_name.required' => 'Resource Name is required',
+            'resource_name.required' => trans('message.resources.resource_name_required', [], $lang),
         ];
 
         return $this->validateRequest($request->all(), $rules, $messages);
@@ -524,6 +658,14 @@ class ResourceService
 
         return $this->validateRequest($request->all(), $rules, $messages);
     }
+    /**
+     * Updates a resource based on the provided request data.
+     *
+     * @param \Illuminate\Http\Request $request The incoming HTTP request containing the data to update the resource.
+     *
+     * @return \Illuminate\Http\Response|mixed Returns a response or any data that represents the result of the update operation.
+     *         This may include success messages, error messages, or other relevant data after updating the resource.
+     */
     private function updateResource(Request $request)
     {
         $resourceId = $this->decryptedValues($request->resource_id);
@@ -533,5 +675,62 @@ class ResourceService
             'monthly_fee' => $request->monthly_amount,
             'annual_fee' => $request->annual_amount,
         ]);
+    }
+    /**
+     * Retrieve modules list for a specific user.
+     *
+     * Determines if the user is an admin or regular user,
+     * and returns the appropriate modules list.
+     *
+     * @param int|string $userId The ID of the user.
+     *
+     * @return mixed The formatted modules list response.
+     */
+    private function getModulesListForUser($userId)
+    {
+        if ($this->isAdminUser($userId)) {
+            return $this->getAdminModules();
+        }
+
+        return $this->getUserModules($userId);
+    }
+    /**
+     * Retrieve modules list for an admin user.
+     *
+     * Fetches all resources and formats them for admin view.
+     *
+     * @return mixed The formatted success response with all modules.
+     */
+    private function getAdminModules()
+    {
+        $resources = Resources::select('id as resource_id', 'resource_name')->get();
+        $data = $this->formatMultipleResources($resources);
+        $lang = $request->language ?? 'en';
+
+        return $this->successResponse($data, trans('message.success.module_topic_list', [], $lang));
+    }
+    /**
+     * Retrieve modules list for a regular user.
+     *
+     * Checks user subscription and returns associated resource,
+     * or a failure response if none found.
+     *
+     * @param int|string $userId The ID of the user.
+     *
+     * @return mixed Success response with single resource or failure response.
+     */
+    private function getUserModules($userId)
+    {
+        $resource = UserSubscription::where('user_id', $userId)
+            ->select('resource_id')
+            ->first();
+
+        if (! $resource) {
+            $lang = $request->language ?? 'en';
+            return $this->failedResponse(trans('message.error.no_subscription', [], $lang));
+        }
+
+        $data = $this->formatSingleResource($resource->resource_id);
+        return $this->successResponse($data, 'Modules with Topics List');
     }
 }

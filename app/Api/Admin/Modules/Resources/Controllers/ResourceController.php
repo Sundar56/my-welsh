@@ -70,7 +70,7 @@ class ResourceController extends BaseController
     public function editResource(Request $request): JsonResponse
     {
         return $this->handleServiceResponse(
-            $this->resourceService->editResource($request)
+            $this->resourceService->editResourceNew($request)
         );
     }
     /**
@@ -95,6 +95,17 @@ class ResourceController extends BaseController
 
         return $this->handleServiceResponse(
             $this->resourceService->allModulesList($userId)
+        );
+    }
+    /**
+     * Handle delete resource topic.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function deleteTopicFile(Request $request): JsonResponse
+    {
+        return $this->handleServiceResponse(
+            $this->resourceService->deleteTopicFile($request)
         );
     }
 }

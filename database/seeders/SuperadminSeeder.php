@@ -7,6 +7,7 @@ use Illuminate\Database\Seeder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Spatie\Permission\Models\Role;
+use Tymon\JWTAuth\Claims\Custom;
 
 /**
  * Seeder class responsible for creating the superadmin user and role.
@@ -36,6 +37,8 @@ class SuperadminSeeder extends Seeder
                     'name' => env('ADMIN_NAME'),
                     'email' => $userEmail,
                     'password' => Hash::make($userPassword),
+                    'is_activated' => config('custom.roles.admin'),
+                    'payment_type' => '',
                 ]);
 
                 $this->command->info('Superadmin created successfully.');

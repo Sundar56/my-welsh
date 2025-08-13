@@ -101,10 +101,32 @@ class CustomersController extends BaseController
      *
      * @return \Illuminate\Http\JsonResponse
      */
-    public function getBillingEmails(): JsonResponse
+    public function getBillingEmails(Request $request): JsonResponse
     {
         return $this->handleServiceResponse(
-            $this->customerService->getBillingEmails()
+            $this->customerService->getBillingEmails($request)
+        );
+    }
+    /**
+     * Handle get Billing invoice users list.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function bacsCustomerList(Request $request): JsonResponse
+    {
+        return $this->handleServiceResponse(
+            $this->customerService->bacsCustomerList($request)
+        );
+    }
+    /**
+     * Handle activate customers by admin.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function activateCustomers(Request $request): JsonResponse
+    {
+        return $this->handleServiceResponse(
+            $this->customerService->activateCustomers($request)
         );
     }
 }

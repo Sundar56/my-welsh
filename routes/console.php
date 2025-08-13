@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
-// Artisan::command('inspire', function () {
-//     $this->comment(Inspiring::quote());
-// })->purpose('Display an inspiring quote');
+use Illuminate\Support\Facades\Schedule;
+
+Schedule::command('php artisan app:trail-expiry-notification')->daily();
+Schedule::command('php artisan app:subscription-expiry-mail')->daily();

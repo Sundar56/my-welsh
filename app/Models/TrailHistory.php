@@ -22,5 +22,11 @@ class TrailHistory extends Model
         'trail_end_date',
         'trail_expired_at',
         'status',
+        'expiry_mail',
     ];
+
+    public function user()
+    {
+        return $this->belongsTo(User::class);
+    }
 }

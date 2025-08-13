@@ -29,9 +29,10 @@ class AdminSettingController extends BaseController
     {
         $userId = $this->getUserIdFromToken($request);
         $roleId = $this->getRoleIdFromToken($request);
+        $lang = $request->query('language', 'en');
 
         return $this->handleServiceResponse(
-            $this->userSettingServcie->userViewProfile($userId, $roleId)
+            $this->userSettingServcie->userViewProfile($userId, $roleId, $lang)
         );
     }
     /**
@@ -46,6 +47,45 @@ class AdminSettingController extends BaseController
 
         return $this->handleServiceResponse(
             $this->userSettingServcie->userEditProfile($request, $userId, $roleId)
+        );
+    }
+    /**
+     * Create the admin settings information.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function createSettings(Request $request): JsonResponse
+    {
+        $userId = $this->getUserIdFromToken($request);
+
+        return $this->handleServiceResponse(
+            $this->userSettingServcie->createSettings($request, $userId)
+        );
+    }
+    /**
+     * View the admin settings information.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function viewAdminSettings(Request $request): JsonResponse
+    {
+        $userId = $this->getUserIdFromToken($request);
+
+        return $this->handleServiceResponse(
+            $this->userSettingServcie->viewAdminSettings($request, $userId)
+        );
+    }
+    /**
+     * Edit the admin settings information.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    public function editAdminSettings(Request $request): JsonResponse
+    {
+        $userId = $this->getUserIdFromToken($request);
+
+        return $this->handleServiceResponse(
+            $this->userSettingServcie->editSettings($request, $userId)
         );
     }
 }

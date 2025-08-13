@@ -31,7 +31,7 @@ class ViewPlaylistController extends BaseController
     public function viewPlaylistByParent(Request $request): JsonResponse
     {
         return $this->handleServiceResponse(
-            $this->playlistService->viewPlaylist($request)
+            $this->playlistService->viewPlaylist($request, 'parent')
         );
     }
     /**

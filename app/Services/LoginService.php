@@ -50,13 +50,14 @@ class LoginService
         return $this->runInTransaction(function () use ($request) {
             $validationErrors = $request->payment_type === UserSubscription::BACS
                 ? $this->validateSignupforBacs($request)
-                : $this->validateSignupForCard($request);
+                : $this->validateSignupForCard($request, ModelHasRoles::TEACHER);
             if ($validationErrors) {
                 return $this->validationErrorResponse($validationErrors);
             }
             $request->payment_type === UserSubscription::BACS ? $this->createUserForBacs($request) : $this->createUserForCard($request);
+            $lang = $request->language ?? 'en';
 
-            return $this->successResponse(null, 'Registration complete. Welcome aboard!');
+            return $this->successResponse(null, trans('message.success.register', [], $lang));
         });
     }
     /**
@@ -80,11 +81,12 @@ class LoginService
         $resourceId = $this->decryptedValues($request->resource_id);
         $type = $this->storeUserSubscription($resourceId, $user->id);
         if ($isTrail) {
-            $this->subscriptionService->buildTrailHistory($user->id, $resourceId);
+            $trailResourceId = $this->decryptedValues($request->trail_resource_id);
+            $this->subscriptionService->buildTrailHistory($user->id, $trailResourceId);
         } else {
-            $this->subscriptionService->buildSubscriptionHistory($type['id'], $resourceId);
+            $this->buildSubscriptionHistory($type['id'], $resourceId);
+            $this->stripeService->createCustomers($request, $user->id);
         }
-        $this->stripeService->createCustomers($request, $user->id);
 
         return $user;
     }
@@ -100,17 +102,21 @@ class LoginService
         $billingInvoice = $this->createBillingInvoice($request->invoice_email);
         $role = Role::where('id', $request->user_type)->where('type', 1)->first();
         $emails = array_filter(array_map('trim', explode(',', $request->school_email)));
+        $invoiceEmail = trim($request->invoice_email);
+        $lang = $request->language ?? 'en';
+        if (in_array($invoiceEmail, $emails)) {
+            return $this->failedResponse(trans('message.errors.invoice_email_conflict', [], $lang));
+        }
         $resourceIds = is_array($request->resource_id)
             ? array_filter(array_map('trim', $request->resource_id))
             : [];
         if (count($emails) !== count($resourceIds)) {
-            return $this->failedResponse('Email and Resource ID count mismatch.');
+            return $this->failedResponse(trans('message.errors.email_resource_mismatch', [], $lang));
         }
         $mappedData = array_map(null, $emails, $resourceIds);
 
-        return $this->createAndAssignUsers($mappedData, $role, $billingInvoice->id);
+        return $this->createAndAssignUsers($mappedData, $role, $billingInvoice->id, $lang);
     }
-
     /**
      * @param Request $request
      * @param  string $type
@@ -132,7 +138,8 @@ class LoginService
             $userData = $this->buildUserDataArray($user, $roleData, $token);
             $this->handleLoginHistory($user, $request, $roleData);
             // $encryptedUserData = $this->encryptUserData($userData);
-            return $this->successResponse($userData, 'You have successfully logged in');
+            $lang = $request->language ?? 'en';
+            return $this->successResponse($userData, trans('message.success.login', [], $lang));
         });
     }
     /**
@@ -153,9 +160,10 @@ class LoginService
             $newPassword = Str::random(10);
             $user->password = Hash::make($newPassword);
             $user->save();
-            $this->sendUserEmail($user->email, $newPassword, 'forgot');
+            $lang = $request->language ?? 'en';
+            $this->sendUserEmail($user->email, $newPassword, 'forgot', $lang, null);
 
-            return $this->successResponse(null, 'Password reset email sent successfully!');
+            return $this->successResponse(null, trans('message.success.password_reset', [], $lang));
         });
     }
     /**
@@ -165,12 +173,13 @@ class LoginService
      *
      * @return array
      */
-    public function logout()
+    public function logout(Request $request)
     {
-        return $this->runInTransaction(function () {
+        return $this->runInTransaction(function () use ($request) {
             JWTAuth::invalidate(JWTAuth::getToken());
 
-            return $this->successResponse(null, 'Successfully logged out');
+            $lang = $request->language ?? 'en';
+            return $this->successResponse(null, trans('message.success.logout', [], $lang));
         });
     }
     /**
@@ -179,23 +188,163 @@ class LoginService
      * @param Request $request The HTTP request with user info
      * @param bool $isSubscribed Whether the user is subscribed
      * @param bool $isTrail Whether the subscription is a trial
-     * @param string|null $subscriptionStartDate Trial/subscription start date
-     * @param string|null $subscriptionEndDate Trial/subscription end date
      */
     public function createUserFromRequest(array $data, bool $isSubscribed, bool $isTrail)
     {
+        $name = Str::title(str_replace(['.', '_'], ' ', Str::before($data['email'], '@')));
+        $isActivated = $isTrail
+            ? UserSubscription::STATUS_ONE
+            : ($data['isActivated'] ?? UserSubscription::STATUS_ZERO);
+
         return User::create([
             'email' => $data['email'],
             'password' => Hash::make($data['password']),
             'payment_type' => $data['payment_type'] ?? null,
-            // 'language_code' => $data['language_code'] ?? 1,
-            'language_code' => UserSubscription::STATUS_ONE,
+            'language_code' => $this->getLanguageCodeValue($data['language']),
             'is_subscribed' => $isSubscribed,
             'is_trail' => $isTrail,
-            'name' => $data['name'] ?? '',
-            'is_customer' => $data['isCustomer'] ?? 0,
-            'is_activated' => $data['isActivated'] ?? 0,
+            'name' => $name ?? '',
+            'is_customer' => $data['isCustomer'] ?? UserSubscription::STATUS_ZERO,
+            'is_activated' => $isActivated,
         ]);
+    }
+    /**
+     * Retrieve the role ID and name for the given user ID.
+     *
+     * @param  int  $userId
+     *
+     * @return array  Returns an array with 'roleId' and 'roleName', or an empty array if no role is found.
+     */
+    public function getUserRole(int $userId): array
+    {
+        $roles = ModelHasRoles::where('model_id', $userId)->first();
+
+        if (! $roles) {
+            return [];
+        }
+
+        $roleName = Role::select('display_name')->where('id', $roles->role_id)->first();
+
+        return [
+            'roleId' => $roles->role_id,
+            'roleName' => $roleName->display_name ?? '',
+        ];
+    }
+    /**
+     * Validates the incoming request data for a general form submission.
+     *
+     * @param \Illuminate\Http\Request $request The incoming HTTP request.
+     *
+     * @return \Illuminate\Contracts\Validation\Validator The validator instance with validation rules applied.
+     */
+    public function validate(Request $request)
+    {
+        $lang = $request->language ?? 'en';
+
+        $rules = [
+            'username' => 'required|email',
+            'password' => 'required',
+        ];
+
+        $messages = trans('message.login_val', [], $lang);
+
+        return $this->validateRequest($request->all(), $rules, $messages);
+    }
+    /**
+     * @param Request $request
+     * @param int $roleId
+     *
+     * @return \Illuminate\Contracts\Validation\Validator
+     */
+    public function validateSignupForCard(Request $request, int $roleId): ?array
+    {
+        $lang = $request->language ?? 'en';
+        $rules = match ($roleId) {
+            ModelHasRoles::TEACHER => $this->getSignupValidationRules(),
+            ModelHasRoles::PARENT => $this->getParentSignupValidationRules(),
+            default => [],
+        };
+
+        $messages = $this->getSignupValidationMessages($lang);
+
+        return $this->validateRequest($request->all(), $rules, $messages);
+    }
+    /**
+     * Get validation rules for signup.
+     *
+     * @return array
+     */
+    public function getSignupValidationRules(): array
+    {
+        return [
+            'email' => 'required|email|unique:users,email',
+            'password' => [
+                'required',
+                'string',
+                'min:8',
+                'regex:/[A-Z]/',
+                'regex:/[@$!%*#?&]/',
+            ],
+            'confirm_password' => 'required|same:password',
+        ];
+    }
+    /**
+     * Get validation rules for signup.
+     *
+     * @return array
+     */
+    public function getParentSignupValidationRules(): array
+    {
+        return [
+            'username' => 'required|email|unique:users,email',
+            'password' => [
+                'required',
+                'string',
+                'min:8',
+                'regex:/[A-Z]/',
+                'regex:/[@$!%*#?&]/',
+            ],
+        ];
+    }
+    /**
+     * Validates the user and checks if the provided password matches.
+     *
+     * @param User|null $user The user object or null if not found.
+     * @param string $password The plain text password to verify.
+     *
+     * @return bool True if user exists and password is valid, false otherwise.
+     */
+    public function isValidUser(?User $user, string $password): bool
+    {
+        return $user && $this->checkPassword($password, $user->password);
+    }
+    /**
+     * Checks if the user's account is activated.
+     *
+     * @param User $user The user object to check.
+     *
+     * @return bool True if the account is activated, false otherwise.
+     */
+    public function isActivated(User $user): bool
+    {
+        return (int) $user->is_activated === 1;
+    }
+    /**
+     * Check if the given role ID is authorized for the specified user type.
+     *
+     * @param string $type   The user type ('admin', 'user', 'parent', etc.)
+     * @param int    $roleId The role ID to verify against the user type.
+     *
+     * @return bool True if the role ID is authorized for the given type, false otherwise.
+     */
+    public function isAuthorized(string $type, int $roleId): bool
+    {
+        return match ($type) {
+            'admin' => $roleId === ModelHasRoles::ADMIN,
+            'user' => in_array($roleId, [ModelHasRoles::TEACHER, ModelHasRoles::PARENT], true),
+            'parent' => $roleId === ModelHasRoles::PARENT,
+            default => false,
+        };
     }
     /**
      * Handle login history by updating the previous record if incomplete,
@@ -207,10 +356,57 @@ class LoginService
      *
      * @return void
      */
-    protected function handleLoginHistory(User $user, Request $request, array $roleData): void
+    public function handleLoginHistory(User $user, Request $request, array $roleData): void
     {
         $this->updatePreviousLoginRecord($user, $roleData);
         $this->createLoginRecord($user, $request, $roleData);
+    }
+    /**
+     * Generate JWT token for the authenticated user.
+     *
+     * @param User $user
+     * @param string|int $roleId
+     *
+     * @return string
+     */
+    public function generateToken(User $user, string|int $roleId): string
+    {
+        $claimsBlob = Crypt::encryptString(json_encode([
+            'id' => $user->id,
+            'email' => $user->email,
+            'name' => $user->name,
+            'roleId' => $roleId,
+        ]));
+
+        $customClaims = [
+            'encryptedData' => $claimsBlob,
+            'iss' => 'Admin',
+            'iat' => (int) now()->timestamp,
+        ];
+
+        return JWTAuth::claims($customClaims)->fromUser($user);
+    }
+    /**
+     * Build structured user data array.
+     *
+     * @param User $user
+     * @param array<string, string> $roleData
+     * @param string $token
+     *
+     * @return array
+     */
+    public function buildUserDataArray(User $user, array $roleData, string $token): array
+    {
+        $expIn = config('jwt.ttl') * 60;
+        return [
+            'userId' => $user->id,
+            'email' => $user->email,
+            'role' => $roleData['roleName'] ?? '',
+            'roleId' => $roleData['roleId'] ?? '',
+            'token' => $token,
+            'exp_in' => $expIn,
+            'isActivated' => $user->is_activated,
+        ];
     }
     /**
      * Update the previous login record's logout time and session duration
@@ -301,10 +497,11 @@ class LoginService
      * @param Role|null $role
      * @param int $billingInvoiceId
      * @param array $resources
+     * @param string $lang
      *
      * @return User|null  The last created user
      */
-    private function createAndAssignUsers(array $mappedData, ?Role $role, int $billingInvoiceId): ?User
+    private function createAndAssignUsers(array $mappedData, ?Role $role, int $billingInvoiceId, string $lang): ?User
     {
         $lastUser = null;
         foreach ($mappedData as [$email, $encryptedResourceId]) {
@@ -315,11 +512,11 @@ class LoginService
             $resourceId = $this->decryptedValues($encryptedResourceId);
             $type = $this->storeUserSubscription($resourceId, $user->id);
             $this->subscriptionService->buildSubscriptionHistory($type['id'], $resourceId);
-            // $this->sendUserEmail($email, $password, 'newuser');
+            $this->sendUserEmail($email, $password, 'newuser', $lang, null);
             $lastUser = $user;
         }
         if ($billingInvoiceId) {
-            InvoiceEmailJob::dispatch($billingInvoiceId);
+            InvoiceEmailJob::dispatch($billingInvoiceId, $lang);
         }
         return $lastUser;
     }
@@ -357,19 +554,6 @@ class LoginService
         ]);
     }
     /**
-     * Retrieve a user by email with limited fields.
-     *
-     * @param  string  $email
-     *
-     * @return \App\Models\User|null  Returns the user instance or null if not found.
-     */
-    private function getUserByEmail(string $email): ?User
-    {
-        return User::select('id', 'email', 'password', 'name')
-            ->where('email', $email)
-            ->first();
-    }
-    /**
      * Check if the given password matches the hashed password.
      *
      * @param  string  $inputPassword
@@ -382,74 +566,6 @@ class LoginService
         return Hash::check($inputPassword, $hashedPassword);
     }
     /**
-     * Retrieve the role ID and name for the given user ID.
-     *
-     * @param  int  $userId
-     *
-     * @return array  Returns an array with 'roleId' and 'roleName', or an empty array if no role is found.
-     */
-    private function getUserRole(int $userId): array
-    {
-        $roles = ModelHasRoles::where('model_id', $userId)->first();
-
-        if (! $roles) {
-            return [];
-        }
-
-        $roleName = Role::select('display_name')->where('id', $roles->role_id)->first();
-
-        return [
-            'roleId' => $roles->role_id,
-            'roleName' => $roleName->display_name ?? '',
-        ];
-    }
-    /**
-     * Generate JWT token for the authenticated user.
-     *
-     * @param User $user
-     * @param string|int $roleId
-     *
-     * @return string
-     */
-    private function generateToken(User $user, string|int $roleId): string
-    {
-        $claimsBlob = Crypt::encryptString(json_encode([
-            'id' => $user->id,
-            'email' => $user->email,
-            'name' => $user->name,
-            'roleId' => $roleId,
-        ]));
-
-        $customClaims = [
-            'encryptedData' => $claimsBlob,
-            'iss' => 'Admin',
-            'iat' => (int) now()->timestamp,
-        ];
-
-        return JWTAuth::claims($customClaims)->fromUser($user);
-    }
-    /**
-     * Build structured user data array.
-     *
-     * @param User $user
-     * @param array<string, string> $roleData
-     * @param string $token
-     *
-     * @return array
-     */
-    private function buildUserDataArray(User $user, array $roleData, string $token): array
-    {
-        $expIn = config('jwt.ttl') * 60;
-        return [
-            'userId' => $user->id,
-            'email' => $user->email,
-            'role' => $roleData['roleName'] ?? '',
-            'roleId' => $roleData['roleId'] ?? '',
-            'token' => $token,
-            'exp_in' => $expIn,
-        ];
-    }
-    /**
      * Encrypt user data into a token-safe string.
      *
      * @param array<string, string> $userData
@@ -460,81 +576,35 @@ class LoginService
     {
         return $this->dataSecurityService->encrypt($userData);
     }
-    private function validate(Request $request)
-    {
-        $rules = [
-            'username' => 'required|email',
-            'password' => 'required',
-        ];
-        $messages = [
-            'username.required' => 'Email is required',
-            'username.email' => 'Must be a valid email address.',
-            'password.required' => 'Password is required',
-        ];
-
-        return $this->validateRequest($request->all(), $rules, $messages);
-    }
+    /**
+     * Validates the request data for a forgot password request.
+     *
+     * @param \Illuminate\Http\Request $request The incoming HTTP request containing email and other necessary data.
+     *
+     * @return \Illuminate\Contracts\Validation\Validator The validator instance with validation rules applied for password recovery.
+     */
     private function validateForgotPassword(Request $request)
     {
+        $lang = $request->language ?? 'en';
+
         $rules = [
             'username' => 'required|email|exists:users,email',
         ];
-        $messages = [
-            'username.required' => 'Email is required.',
-            'username.email' => 'Must be a valid email address.',
-            'username.exists' => 'User not found with this email.',
-        ];
+
+        $messages = trans('message.login_val', [], $lang);
 
         return $this->validateRequest($request->all(), $rules, $messages);
-    }
-    /**
-     * @param Request $request
-     *
-     * @return \Illuminate\Contracts\Validation\Validator
-     */
-    private function validateSignupForCard(Request $request): ?array
-    {
-        $rules = $this->getSignupValidationRules();
-        $messages = $this->getSignupValidationMessages();
-
-        return $this->validateRequest($request->all(), $rules, $messages);
-    }
-    /**
-     * Get validation rules for signup.
-     *
-     * @return array
-     */
-    private function getSignupValidationRules(): array
-    {
-        return [
-            'email' => 'required|email|unique:users,email',
-            'password' => [
-                'required',
-                'string',
-                'min:8',
-                'regex:/[A-Z]/',
-                'regex:/[@$!%*#?&]/',
-            ],
-            'confirm_password' => 'required|same:password',
-        ];
     }
     /**
      * Get custom validation messages for signup.
      *
+     * @param string $lang language code
+     *
      * @return array
      */
-    private function getSignupValidationMessages(): array
+    private function getSignupValidationMessages(string $lang = 'en'): array
     {
-        return [
-            'email.required' => 'Email is required',
-            'email.email' => 'Enter a valid email',
-            'email.unique' => 'Email already exists',
-            'password.required' => 'Password is required',
-            'password.min' => 'Password must be 8+ chars',
-            'password.regex' => 'Use 1 uppercase & 1 special char',
-            'confirm_password.required' => 'Confirm Password is required',
-            'confirm_password.same' => 'Confirm Password must match',
-        ];
+        return trans('message.signup_val', [], $lang);
     }
     /**
      * @param Request $request
@@ -543,40 +613,43 @@ class LoginService
      */
     private function validateSignupforBacs(Request $request): ?array
     {
+        $lang = $request->language ?? 'en';
         $rules = [
             'invoice_email' => 'required|email|unique:billing_emails,invoice_email',
             'school_email' => [
                 'required',
-                function ($_attribute, $value, $fail) {
-                    $this->validateSchoolEmails($value, $fail);
+                function ($attribute, $value, $fail) use ($lang) {
+                    $this->validateSchoolEmails($value, $fail, $lang);
                 },
             ],
         ];
-        $messages = [
-            'invoice_email.required' => 'Billing Email required',
-            'invoice_email.email' => 'Provide valid billing email address',
-            'invoice_email.unique' => 'Billing email registered already',
-            'school_email.required' => 'School Primary Email required',
-        ];
+        $messages = $this->getSignupValidationMessages($lang);
 
         return $this->validateRequest($request->all(), $rules, $messages);
     }
-    private function validateSchoolEmails(string $value, callable $fail): void
+    /**
+     * Validate a school email address and call the failure callback if invalid.
+     *
+     * @param string  $value The email address to validate.
+     * @param callable $fail  A callback function to call if the validation fails.
+     *
+     * @return void
+     */
+    private function validateSchoolEmails(string $value, callable $fail, string $lang = 'en'): void
     {
         $emails = array_filter(array_map('trim', explode(',', $value)));
         if (count($emails) === 0) {
-            $fail('At least one email must be provided.');
+            $fail(trans('message.school_email_val.atlease_one', [], $lang));
             return;
         }
-
         foreach ($emails as $email) {
             if (! filter_var($email, FILTER_VALIDATE_EMAIL)) {
-                $fail("Email address '{$email}' invalid.");
+                $fail(trans('message.school_email_val.invalid', ['email' => $email], $lang));
                 return;
             }
 
             if (User::where('email', $email)->exists()) {
-                $fail("'{$email}' registered already");
+                $fail(trans('message.school_email_val.exists', ['email' => $email], $lang));
                 return;
             }
         }
@@ -593,59 +666,23 @@ class LoginService
     private function authenticateUser(Request $request, string $type): array
     {
         $user = $this->getUserByEmail($request->username);
-        if (! $user || ! $this->checkPassword($request->password, $user->password)) {
-            return [null, null, 'Username / password is incorrect'];
+        $lang = $request->language ?? 'en';
+
+        if (! $this->isValidUser($user, $request->password)) {
+            return [null, null, trans('message.errors.invalid_credentials', [], $lang)];
+        }
+
+        if (! $this->isActivated($user)) {
+            return [null, null, trans('message.errors.not_activated', [], $lang)];
         }
 
         $roleData = $this->getUserRole($user->id);
-        if (
-            ($type === 'user' && $roleData['roleId'] === ModelHasRoles::ADMIN) ||
-            ($type === 'admin' && $roleData['roleId'] !== ModelHasRoles::ADMIN)
-        ) {
-            return [null, null, 'This account is not allowed to log in.'];
+
+        if (! $this->isAuthorized($type, $roleData['roleId'])) {
+            return [null, null, trans('message.errors.not_authorized', [], $lang)];
         }
 
         return [$user, $roleData, null];
-    }
-    /**
-     * Get billing invoice user details with their first subscribed resource.
-     *
-     * @param int $billingInvoiceId
-     *
-     * @return array
-     */
-    private function billingInvoice($billingInvoiceId)
-    {
-        $data = [];
-
-        $billingUsers = BillingInvoiceUsers::where('billing_invoice_id', $billingInvoiceId)->get();
-        $billingInvoice = BillingEmail::find($billingInvoiceId);
-
-        foreach ($billingUsers as $billingUser) {
-            $user = $this->getUserById($billingUser->user_id);
-            $subscription = $this->getLatestSubscriptionForUser($billingUser->user_id);
-            $resource = $this->getResourceFromSubscription($subscription);
-
-            $data[] = [
-                'user_email' => $user?->email,
-                'resource_name' => $resource?->resource_name ?? null,
-                'amount' => $resource?->annaul_fee ?? 0,
-            ];
-        }
-        if (! empty($data) && $billingInvoice?->invoice_email) {
-            InvoiceEmailJob::dispatch($data, $billingInvoice->invoice_email);
-        }
-    }
-    /**
-     * Get a user by ID.
-     *
-     * @param int $userId
-     *
-     * @return User|null
-     */
-    private function getUserById(int $userId): ?User
-    {
-        return User::find($userId);
     }
     /**
      * Get the latest subscription entry for a given user.

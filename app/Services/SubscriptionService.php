@@ -5,7 +5,6 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Api\Admin\Modules\Resources\Models\Resources;
-use App\Models\SubscriptionHistory;
 use App\Models\TrailHistory;
 use App\Models\User;
 use App\Models\UserSubscription;
@@ -31,7 +30,7 @@ class SubscriptionService
             $resources = $this->getResourcesForUser($userId);
 
             $encryptedResources = $resources->map(function ($resource) {
-                return $this->formatResource($resource);
+                return $this->formatResource($resource, 'en');
             });
 
             return $this->successResponse($encryptedResources, 'Resource listing');
@@ -51,8 +50,9 @@ class SubscriptionService
             $resourceId = $this->decryptedValues($request->resource_id);
             $this->buildTrailHistory($userId, $resourceId);
             $this->updateUserTrailOption($userId);
+            $lang = $request->language_code ?? 'en';
 
-            return $this->successResponse(null, 'Resource for Trail');
+            return $this->successResponse(null, trans('message.success.resource_trail', [], $lang));
         });
     }
     /**
@@ -60,12 +60,14 @@ class SubscriptionService
      *
      * @return array List of subscription records.
      */
-    public function getSubscriptionList(): array
+    public function getSubscriptionList(Request $request): array
     {
-        return $this->runInTransaction(function () {
+        return $this->runInTransaction(function () use ($request) {
             $resources = Resources::select('id', 'resource_name', 'annual_fee')->get();
-            $encryptedResources = $resources->map(function ($resource) {
-                return $this->formatResource($resource);
+            $encryptedResources = $resources->map(function ($resource) use ($request) {
+                // $lang = $request->query('language', 'en');
+                $lang = $request->route('lang', 'en');
+                return $this->formatResource($resource, $lang);
             });
 
             return $this->successResponse($encryptedResources, 'Resource listing');
@@ -90,36 +92,16 @@ class SubscriptionService
         ]);
     }
     /**
-     * Build or log the trail history for a given user and resource.
-     *
-     * @param int $userId The ID of the user.
-     * @param int $resourceId The ID of the resource.
-     *
-     * @return void
-     */
-    public function buildSubscriptionHistory(int $typeId, int $resourceId): void
-    {
-        $resource = Resources::where('id', $resourceId)->first();
-        $startDate = now();
-        $endDate = $startDate->copy()->addYear();
-        SubscriptionHistory::create([
-            'type_id' => $typeId,
-            'subscription_amount' => $resource->annual_fee,
-            'subscription_start_date' => $startDate,
-            'subscription_end_date' => $endDate,
-            'fee_type' => SubscriptionHistory::ANNUAL_FEE,
-        ]);
-    }
-    /**
      * Format a single resource for API response, including encryption and display logic.
      *
      * @param object $resource The resource object containing id, name, and annual fee.
+     * @param string|null $lang The lang of the user.
      *
      * @return array An array with encrypted resource ID and formatted display fields.
      */
-    private function formatResource($resource): array
+    private function formatResource($resource, ?string $lang): array
     {
-        $details = $this->getFormattedResourceDetails($resource);
+        $details = $this->getFormattedResourceDetails($resource, $lang);
 
         return [
             'resourceId' => Crypt::encrypt($resource->id),
@@ -133,18 +115,50 @@ class SubscriptionService
      * Format resource details based on whether the resource is a trial or not.
      *
      * @param object $resource The resource object containing name and annual fee.
+     * @param string|null $lang The lang of the user.
      *
      * @return array An array with formatted resourceName, amount, amountText, and subText.
      */
-    private function getFormattedResourceDetails($resource): array
+    private function getFormattedResourceDetails($resource, ?string $lang): array
     {
         $isTrial = strtolower($resource->resource_name) === 'trail';
 
+        if ($isTrial && $lang) {
+            return $this->getTrialResourceInfo($lang);
+        }
+        return $this->getRegularResourceInfo($resource, $lang);
+    }
+    /**
+     * Get resource info for trial users.
+     *
+     * @param string|null $lang The lang of the user.
+     *
+     * @return array
+     */
+    private function getTrialResourceInfo(?string $lang): array
+    {
         return [
-            'resourceName' => $isTrial ? 'Free 7 Day Trial' : $resource->resource_name,
-            'resourceAmount' => $isTrial ? 'Free' : '£' . $resource->annual_fee,
-            'amountText' => $isTrial ? null : 'Per anum',
-            'subText' => $isTrial ? 'Allows you to test out the system.' : null,
+            'resourceName' => trans('message.subscriptions.trial_title', [], $lang),
+            'resourceAmount' => trans('message.subscriptions.free', [], $lang),
+            'amountText' => null,
+            'subText' => trans('message.subscriptions.trial_description', [], $lang),
+        ];
+    }
+    /**
+     * Get resource info for regular (non-trial) users.
+     *
+     * @param string|null $lang The lang of the user.
+     * @param object $resource Object containing resource_name and annual_fee properties.
+     *
+     * @return array
+     */
+    private function getRegularResourceInfo($resource, ?string $lang): array
+    {
+        return [
+            'resourceName' => $resource->resource_name,
+            'resourceAmount' => '£' . $resource->annual_fee,
+            'amountText' => trans('message.subscriptions.text_annum', [], $lang),
+            'subText' => null,
         ];
     }
     /**
@@ -170,16 +184,33 @@ class SubscriptionService
     private function getResourcesForUser(?int $userId): object
     {
         if ($userId !== null) {
-            $resourceIds = UserSubscription::where('user_id', $userId)
-                ->pluck('resource_id');
+            $user = User::where('id', $userId)->select('is_trail')->first();
 
-            return Resources::whereIn('id', $resourceIds)
-                ->select('id', 'resource_name')
-                ->get();
+            return $this->getUserResourcesByType($userId, $user->is_trail === UserSubscription::STATUS_ONE);
         }
 
         return Resources::select('id', 'resource_name', 'annual_fee')
             ->where('type', '!=', TrailHistory::TRAIL)
+            ->get();
+    }
+    /**
+     * Fetch resources for a user based on whether they are on a trial or a paid subscription.
+     *
+     * @param int $userId The ID of the user.
+     * @param bool $isTrial Indicates if the user is on a trial.
+     *
+     * @return object A collection of resources (id and resource_name) assigned to the user.
+     */
+    private function getUserResourcesByType(int $userId, bool $isTrial): object
+    {
+        $resourceIds = $isTrial
+            ? TrailHistory::where('user_id', $userId)->pluck('resource_id')
+            : UserSubscription::where('user_id', $userId)
+                ->where('latest_subscription', UserSubscription::STATUS_ONE)
+                ->pluck('resource_id');
+
+        return Resources::whereIn('id', $resourceIds)
+            ->select('id', 'resource_name')
             ->get();
     }
 }

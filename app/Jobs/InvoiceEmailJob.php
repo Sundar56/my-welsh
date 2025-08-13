@@ -8,7 +8,6 @@ use App\Api\Admin\Modules\Resources\Models\Resources;
 use App\Api\Teacher\Modules\Signup\Models\BillingEmail;
 use App\Api\Teacher\Modules\Signup\Models\BillingInvoiceUsers;
 use App\Mail\SendInvoiceMail;
-use App\Models\User;
 use App\Models\UserSubscription;
 use App\Traits\ApiResponse;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -25,12 +24,15 @@ class InvoiceEmailJob implements ShouldQueue
 
     protected $invoiceId;
 
+    protected $lang;
+
     /**
      * Create a new job instance.
      */
-    public function __construct($invoiceId)
+    public function __construct($invoiceId, $lang)
     {
         $this->invoiceId = $invoiceId;
+        $this->lang = $lang;
     }
 
     /**
@@ -45,21 +47,29 @@ class InvoiceEmailJob implements ShouldQueue
         $invoiceNumber = 'INV-' . str_pad(strval($billingInvoiceId), 6, '0', STR_PAD_LEFT);
         $issueDate = now()->format('d M Y');
         $data = $this->buildEmailData($invoiceEmail, $invoiceData, $invoiceNumber, $issueDate);
-        $invoicePdf = $this->generateInvoicePdf($data);
+        $lang = $this->lang ?? 'en';
+        $invoicePdf = $this->generateInvoicePdf($data, $lang);
 
-        $email = new SendInvoiceMail($data, $invoicePdf);
+        $email = new SendInvoiceMail($data, $invoicePdf, $lang);
+        // $this->logInvoiceMailDebug($invoiceEmail, (array) $data, $invoicePdf, $lang, $email);
         Mail::to($invoiceEmail)->send($email);
     }
     /**
      * Generate and return the file path of the created invoice PDF.
      *
      * @param array $data The data used to populate the invoice (e.g., email, items, total).
+     * @param string $lang languages en or cy.
      *
      * @return string The full path or name of the generated PDF file.
      */
-    public function generateInvoicePdf(array $data): string
+    public function generateInvoicePdf(array $data, string $lang): string
     {
-        $html = View::make('emails.invoicepdf', ['data' => $data])->render();
+        $logoPath = env('FFALALA_LOGO');
+        $pdflogo = $this->getBase64Image($logoPath);
+        $data['pdflogo'] = $pdflogo;
+        $viewName = $lang === 'cy' ? 'emails.invoicepdf_cy' : 'emails.invoicepdf';
+
+        $html = View::make($viewName, ['data' => $data])->render();
 
         try {
             $mpdf = new \Mpdf\Mpdf();
@@ -100,17 +110,6 @@ class InvoiceEmailJob implements ShouldQueue
         ];
     }
     /**
-     * Get a user by ID.
-     *
-     * @param int $userId
-     *
-     * @return User|null
-     */
-    private function getUserById(int $userId): ?User
-    {
-        return User::find($userId);
-    }
-    /**
      * Get the latest subscription entry for a given user.
      *
      * @param int $userId
@@ -148,6 +147,7 @@ class InvoiceEmailJob implements ShouldQueue
     private function buildEmailData($invoiceEmail, $invoiceData, $invoiceNumber, $issueDate): array
     {
         $logo = $this->getLogoPath();
+        $redirectLogin = $this->getRedirectUrl('/login');
 
         return [
             'invoiceEmail' => $invoiceEmail,
@@ -155,6 +155,7 @@ class InvoiceEmailJob implements ShouldQueue
             'invoiceNumber' => $invoiceNumber,
             'issueDate' => $issueDate,
             'logo' => $logo ?? null,
+            'redirectLogin' => $redirectLogin ?? env('FRONT_END_URL'),
         ];
     }
 }

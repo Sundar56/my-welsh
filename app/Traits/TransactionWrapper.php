@@ -9,7 +9,7 @@ trait TransactionWrapper
     /**
      * Execute the given callback within a database transaction.
      *
-     * This ensures that all database operations inside the callback are atomic —
+     * This ensures that all database operations inside the callback are atomic
      * meaning they either all succeed or all fail together. If an exception is
      * thrown during the callback execution, the transaction is rolled back.
      *

@@ -24,6 +24,7 @@ class User extends Authenticatable implements JWTSubject
         'password',
         'payment_type',
         'language_code',
+        'is_activated',
         'is_subscribed',
         'is_trail',
         'is_cancelled',

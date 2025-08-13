@@ -4,7 +4,10 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Api\Admin\Modules\Settings\Models\Settings;
+use App\Api\Admin\Modules\Settings\Models\UpdateSettingHistory;
 use App\Models\ModelHasRoles;
+use App\Models\TrailHistory;
 use App\Models\User;
 use App\Models\UserSubscription;
 use App\Traits\ApiResponse;
@@ -19,36 +22,38 @@ class UserSettingService
 
     protected DataSecurityService $dataSecurityService;
     protected CustomerService $customerService;
+    protected UploadFileService $uploadFileService;
 
-    public function __construct(DataSecurityService $dataSecurityService, CustomerService $customerService)
+    public function __construct(DataSecurityService $dataSecurityService, CustomerService $customerService, UploadFileService $uploadFileService)
     {
         $this->dataSecurityService = $dataSecurityService;
         $this->customerService = $customerService;
+        $this->uploadFileService = $uploadFileService;
     }
     /**
      * Display the user's profile details.
      *
      * @param int $userId Optional user ID to fetch specific resources.
      * @param int $roleId Optional role ID to fetch specific resources.
+     * @param string $lang Dynamic languages with 'en' and 'cy'.
      *
      * @return array
      */
-    public function userViewProfile(int $userId, int $roleId): array
+    public function userViewProfile(int $userId, int $roleId, string $lang = 'en'): array
     {
-        return $this->runInTransaction(function () use ($userId, $roleId) {
+        return $this->runInTransaction(function () use ($userId, $roleId, $lang) {
             $user = $this->getUserById($userId);
             if (! $user) {
-                return $this->failedResponse('User not found');
-            }
-            if (in_array($roleId, [ModelHasRoles::ADMIN, ModelHasRoles::PARENT])) {
-                $data = $this->getAdminOrParentProfile($user->email);
+                return $this->failedResponse(trans('message.login_val.username.exists', [], $lang));
             }
 
-            if ($roleId === ModelHasRoles::TEACHER) {
-                $data = $this->getTeacherProfile($userId, $user->email);
-            }
+            $data = match ($roleId) {
+                ModelHasRoles::ADMIN, ModelHasRoles::PARENT => $this->getAdminOrParentProfile($user->email),
+                ModelHasRoles::TEACHER => $this->getTeacherProfile($userId, $user->email),
+                default => [],
+            };
 
-            return $this->successResponse($data, 'User settings details');
+            return $this->successResponse($data, trans('message.success.user_settings_details', [], $lang));
         });
     }
     /**
@@ -69,11 +74,12 @@ class UserSettingService
             }
             $this->handleEmailUpdate($request, $userId);
             $this->handlePasswordUpdate($request, $userId);
-            if ($roleId === ModelHasRoles::TEACHER) {
+            if ($roleId === ModelHasRoles::TEACHER && $request->resource_id !== null) {
                 $this->handleSubscription($request, $userId);
             }
+            $lang = $request->language ?? 'en';
 
-            return $this->successResponse(null, 'User settings updated');
+            return $this->successResponse(null, trans('message.success.user_settings_updated', [], $lang));
         });
     }
     /**
@@ -122,9 +128,10 @@ class UserSettingService
         $oldPassword = $request->password;
         $newPassword = $request->new_password;
         $repeatPassword = $request->confirm_password;
+        $lang = $request->language ?? 'en';
         $user = User::find($userId);
 
-        $error = $this->validatePasswordChange($user, $oldPassword, $newPassword, $repeatPassword);
+        $error = $this->validatePasswordChange($user, $oldPassword, $newPassword, $repeatPassword, $lang);
         if ($error) {
             return $this->failedResponse($error);
         }
@@ -132,7 +139,7 @@ class UserSettingService
         $user->password = $newPassword;
         $user->save();
 
-        return $this->successResponse(null, 'User settings updated');
+        return $this->successResponse(null, trans('message.success.user_password_updated', [], $lang));
     }
     /**
      * Handles cancel subscription for users
@@ -145,11 +152,88 @@ class UserSettingService
     {
         return $this->runInTransaction(function () use ($request) {
             $userId = $this->getUserIdFromToken($request);
-            User::where('id', $userId)->update([
-                'is_cancelled' => $request->is_cancelled,
-            ]);
+            $lang = $request->language ?? 'en';
+            $user = $this->getUserById($userId);
+            $user->is_cancelled = $request->is_cancelled;
+            $user->save();
 
-            return $this->successResponse(null, 'Subscription cancelled successflly');
+            $this->sendUserEmail($user->email, null, 'cancelled', $lang, $userId);
+
+            return $this->successResponse(null, trans('message.success.subscription_cancelled', [], $lang));
+        });
+    }
+    /**
+     * Create admin settings information.
+     *
+     * @param Request $request
+     * @param int $userId Optional user ID to fetch specific admin settings.
+     *
+     * @return array
+     */
+    public function createSettings(Request $request, int $userId): array
+    {
+        return $this->runInTransaction(function () use ($request, $userId) {
+            $lang = $request->language ?? 'en';
+            if (! $this->isAdminUser($userId)) {
+                return $this->failedResponse(trans('message.errors.admin_setting_val', [], $lang));
+            }
+
+            $settings = $this->storeAdminSettings($request, $userId);
+            $this->uploadFileService->uploadLogoImage($request, $settings['id']);
+
+            return $this->successResponse(null, trans('message.success.setting_success', [], $lang));
+        });
+    }
+    /**
+     * View admin settings information.
+     *
+     * @param Request $request
+     * @param int $userId Optional user ID to fetch specific resources.
+     *
+     * @return array
+     */
+    public function viewAdminSettings(Request $request, int $userId): array
+    {
+        return $this->runInTransaction(function () use ($request, $userId) {
+            $lang = $request->language ?? 'en';
+            if (! $this->isAdminUser($userId)) {
+                return $this->failedResponse(trans('message.errors.admin_setting_val', [], $lang));
+            }
+
+            $settings = Settings::where('user_id', $userId)->first();
+            if (! $settings) {
+                return $this->failedResponse('Settings not found for user ID');
+            }
+            $data = $this->formatSettingsData($settings);
+
+            return $this->successResponse($data, trans('message.success.setting_success', [], $lang));
+        });
+    }
+
+    /**
+     * Edit admin settings information.
+     *
+     * @param Request $request
+     * @param int $userId Optional user ID to fetch specific admin settings.
+     *
+     * @return array
+     */
+    public function editSettings(Request $request, int $userId): array
+    {
+        return $this->runInTransaction(function () use ($request, $userId) {
+            $lang = $request->language ?? 'en';
+            if (! $this->isAdminUser($userId)) {
+                return $this->failedResponse(trans('message.errors.admin_setting_val', [], $lang));
+            }
+            $settingsId = $this->decryptedValues($request->setting_id);
+            $settingsData = Settings::where('id', $settingsId)->first();
+            $previousRecordJson = $settingsData ? json_encode($settingsData->toArray()) : json_encode([]);
+            $updatedSettings = $this->updateAdminSettings($request, $settingsId);
+            $this->uploadFileService->uploadLogoImage($request, $settingsId);
+            $updatedRecordJson = json_encode($updatedSettings->toArray());
+            $this->updateSettingHistory($request, $userId, $previousRecordJson, $updatedRecordJson);
+
+            return $this->successResponse(null, trans('message.success.setting_success', [], $lang));
         });
     }
     /**
@@ -190,13 +274,13 @@ class UserSettingService
      *
      * @return string|null            Returns an error message string if validation fails, or null on success.
      */
-    protected function validatePasswordChange($user, $oldPassword, $newPassword, $repeatPassword): ?string
+    protected function validatePasswordChange($user, $oldPassword, $newPassword, $repeatPassword, string $lang = 'en'): ?string
     {
         $checks = [
-            [! $oldPassword || ! $newPassword, 'Old and new passwords are required.'],
-            [$newPassword !== $repeatPassword, "Repeat Password doesn't match New Password"],
-            [! $user || ! Hash::check($oldPassword, $user->password), "Old Password doesn't match!"],
-            [$oldPassword === $newPassword, 'New Password cannot be the same as your current password'],
+            [! $oldPassword || ! $newPassword, trans('message.errors.password_required_any', [], $lang)],
+            [$newPassword !== $repeatPassword, trans('message.errors.password_mismatch', [], $lang)],
+            [! $user || ! Hash::check($oldPassword, $user->password), trans('message.errors.old_password_invalid', [], $lang)],
+            [$oldPassword === $newPassword, trans('message.errors.password_same_as_old', [], $lang)],
         ];
 
         foreach ($checks as [$condition, $message]) {
@@ -221,7 +305,36 @@ class UserSettingService
             'status' => UserSubscription::STATUS_ONE,
             'latest_subscription' => UserSubscription::STATUS_ZERO,
         ]);
-        $this->customerService->storeUserSubscription($resourceId, $userId);
+        $type = $this->customerService->storeUserSubscription($resourceId, $userId);
+        $user = $this->getUserById($userId);
+        if ($user->is_trail === 1 && $resourceId) {
+            $this->updateTrailSubscription($userId, $resourceId);
+            return;
+        }
+        $this->buildSubscriptionHistory($type['id'], $resourceId);
+    }
+    /**
+     * Format the settings data into a structured array with encrypted ID.
+     *
+     * @param App\Api\Admin\Modules\Settings\Models\Settings $settings The settings model instance.
+     *
+     * @return array The formatted settings data.
+     */
+    protected function formatSettingsData(\App\Api\Admin\Modules\Settings\Models\Settings $settings): array
+    {
+        return [
+            'apiKey' => $settings->apikey,
+            'apiSecret' => $settings->apisecret,
+            'webhookKey' => $settings->webhookkey,
+            'webhookUrl' => $settings->webhookurl,
+            'fixedFee' => $settings->fixedfee,
+            'percentageFee' => $settings->percentagefee,
+            'title' => $settings->title,
+            'description' => $settings->description,
+            'keyword' => $settings->keyword,
+            'logo' => $settings->logo,
+            'encryptedId' => $this->encryptedValues($settings->id),
+        ];
     }
     /**
      * Fetches the profile information (email) for Admin or Parent users.
@@ -246,48 +359,137 @@ class UserSettingService
      */
     private function getTeacherProfile(int $userId, string $userEmail): array
     {
+        $user = User::where('id', $userId)->select('is_trail')->first();
+
+        if ($user?->is_trail === UserSubscription::STATUS_ONE) {
+            return $this->getTrialTeacherProfile($userId, $userEmail);
+        }
+
         $subscriptionData = $this->getLatestTeacherSubscription($userId);
         $formattedAmount = '£' . number_format((float) $subscriptionData->amount, 2);
         $renewalDate = \Carbon\Carbon::parse($subscriptionData->endDate)->format('d/m/Y');
-        $formattedRenewalDate = 'Renews on ' . $renewalDate;
 
         return [
             'emailAddress' => $userEmail,
             'subscriptionFee' => $formattedAmount,
             'resourceName' => $subscriptionData->resourceName,
-            'renewalDate' => $formattedRenewalDate,
+            'renewalDate' => $renewalDate,
         ];
     }
     /**
-     * Retrieves the user by ID, selecting only the email field.
+     * Get teacher profile information for a user on trial.
+     *
+     * @param int $userId
+     * @param string $userEmail
+     *
+     * @return array
+     */
+    private function getTrialTeacherProfile(int $userId, string $userEmail): array
+    {
+        $trialData = $this->getTrialInfo($userId);
+        $renewalDate = \Carbon\Carbon::parse($trialData->trailEndDate)->format('d/m/Y');
+
+        return [
+            'emailAddress' => $userEmail,
+            'subscriptionFee' => 'Free',
+            'resourceName' => $trialData->resourceName ?? 'Free 7 Day Trial',
+            'renewalDate' => $renewalDate ?? '7 Days',
+        ];
+    }
+    /**
+     * Retrieve trial resource information for the specified user.
      *
      * @param int $userId The ID of the user.
      *
-     * @return User|null The User model instance if found, otherwise null.
+     * @return object|null The trial resource data or null if not found.
      */
-    private function getUserById(int $userId): ?User
+    private function getTrialInfo(int $userId): ?object
     {
-        return User::where('id', $userId)->select('email')->first();
-    }
-    /**
-     * Retrieves the latest active teacher subscription with related subscription history using a left join.
-     *
-     * @param int $userId The ID of the teacher.
-     *
-     * @return object|null The subscription and history data object, or null if not found.
-     */
-    private function getLatestTeacherSubscription(int $userId): ?object
-    {
-        return DB::table('user_subscription')
-            ->leftJoin('subscription_history', 'user_subscription.id', '=', 'subscription_history.type_id')
-            ->leftJoin('learning_resources', 'user_subscription.resource_id', '=', 'learning_resources.id')
-            ->where('user_subscription.user_id', $userId)
-            ->where('user_subscription.latest_subscription', UserSubscription::STATUS_ONE)
+        return DB::table('trail_history')
+            ->leftJoin('learning_resources', 'trail_history.resource_id', '=', 'learning_resources.id')
+            ->where('trail_history.user_id', $userId)
             ->select(
-                'subscription_history.subscription_amount as amount',
-                'subscription_history.subscription_end_date as endDate',
                 'learning_resources.resource_name as resourceName',
+                'trail_history.trail_end_date as trailEndDate'
             )
             ->first();
+    }
+    /**
+     * Retrieve trial resource information for the specified user.
+     *
+     * @param int $userId The ID of the user.
+     * @param int $resourceId The resourceId of the user.
+     *
+     * @return void
+     */
+    private function updateTrailSubscription(int $userId, int $resourceId): void
+    {
+        TrailHistory::where('user_id', $userId)->update([
+            'resource_id' => $resourceId,
+        ]);
+    }
+    /**
+     * Store admin-specific settings from the given request.
+     *
+     * @param Request $request The HTTP request containing admin settings data.
+     * @param int $userId Optional user ID to fetch specific admin settings.
+     *
+     * @return array Response data indicating success or failure.
+     */
+    private function storeAdminSettings(Request $request, int $userId): array
+    {
+        $settings = Settings::create([
+            'user_id' => $userId,
+            'apikey' => $request->apikey,
+            'apisecret' => $request->apisecret,
+            'webhookkey' => $request->webhookkey,
+            'webhookurl' => $request->webhookurl,
+            'fixedfee' => $request->fixedfee,
+            'percentagefee' => $request->percentagefee,
+            'title' => $request->title,
+            'description' => $request->description,
+            'keyword' => $request->keyword,
+        ]);
+
+        return [
+            'id' => $settings->id,
+        ];
+    }
+    /**
+     * Update admin-specific settings from the given request.
+     *
+     * @param Request $request The HTTP request containing admin settings data.
+     * @param int $settingsId Optional settings ID to fetch specific admin settings.
+     *
+     * @return App\Api\Admin\Modules\Settings\Models\Settings The updated settings model.
+     */
+    private function updateAdminSettings(Request $request, int $settingsId): \App\Api\Admin\Modules\Settings\Models\Settings
+    {
+        $settings = Settings::findOrFail($settingsId);
+
+        $settings->update([
+            'apikey' => $request->apikey,
+            'apisecret' => $request->apisecret,
+            'webhookkey' => $request->webhookkey,
+            'webhookurl' => $request->webhookurl,
+            'fixedfee' => $request->fixedfee,
+            'percentagefee' => $request->percentagefee,
+            'title' => $request->title,
+            'description' => $request->description,
+            'keyword' => $request->keyword,
+        ]);
+
+        return $settings->fresh();
+    }
+    private function updateSettingHistory($request, $userId, $previousRecordJson, $updatedRecordJson)
+    {
+        UpdateSettingHistory::create([
+            'updated_by' => $userId,
+            'previous_record' => $previousRecordJson,
+            'updated_record' => $updatedRecordJson,
+            'updated_time' => now(),
+            'ipaddress' => $request->ip(),
+            'useragent' => $request->userAgent(),
+        ]);
     }
 }

@@ -15,14 +15,16 @@ class SendInvoiceMail extends Mailable
 
     private $data;
     private $invoicePdf;
+    private $lang;
 
     /**
      * Create a new message instance.
      */
-    public function __construct($data, $invoicePdf)
+    public function __construct($data, $invoicePdf, $lang)
     {
         $this->data = $data;
         $this->invoicePdf = $invoicePdf;
+        $this->lang = $lang;
     }
 
     /**
@@ -40,8 +42,12 @@ class SendInvoiceMail extends Mailable
      */
     public function content(): Content
     {
+        $view = $this->lang === 'cy'
+            ? 'emails.invoice_cy'
+            : 'emails.invoice';
+
         return new Content(
-            view: 'emails.invoice',
+            view: $view,
             with: [
                 'data' => $this->data,
             ],
@@ -57,7 +63,7 @@ class SendInvoiceMail extends Mailable
     {
         $attachments = [];
 
-        if (! empty($this->invoicePdf)) {
+        if (! is_null($this->invoicePdf) && $this->invoicePdf !== '') {
             $attachments[] = Attachment::fromData(fn () => $this->invoicePdf, 'invoice.pdf')
                 ->withMime('application/pdf');
         }

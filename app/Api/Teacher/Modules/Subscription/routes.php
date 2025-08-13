@@ -10,5 +10,5 @@ Route::group([
     Route::get('/trailresourcelist', 'SubscriptionController@trailResourceList')->name('teacher.trail.getlist');
     Route::post('/updateusertrail', 'SubscriptionController@updateTrailData')->name('teacher.trail.update');
 
-    Route::get('/subscriptionlist', 'SubscriptionController@getSubscriptionList')->name('teacher.subscription.getlist');
+    Route::get('/subscriptionlist/{lang?}', 'SubscriptionController@getSubscriptionList')->name('teacher.subscription.getlist');
 });

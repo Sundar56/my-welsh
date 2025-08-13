@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Api\Admin\Modules\Resources\Models\ModuleResourceTopic;
+use App\Api\Admin\Modules\Settings\Models\Settings;
 use App\Traits\ApiResponse;
 use App\Traits\TransactionWrapper;
 use Illuminate\Http\Request;
@@ -38,18 +39,36 @@ class UploadFileService
         });
     }
     /**
+     * Upload settings logo.
+     *
+     * @param \Illuminate\Http\Request $request The HTTP request containing file and resource_type.
+     * @param int $settingId The settings ID for building the upload logo path.
+     *
+     * @return \Illuminate\Http\JsonResponse A success or error JSON response.
+     */
+    public function uploadLogoImage(Request $request, int $settingId)
+    {
+        return $this->runInTransaction(function () use ($request, $settingId) {
+            $this->updateLogo($request, $settingId);
+
+            return null;
+        });
+    }
+    /**
      * @param Request $request
      *
      * @return \Illuminate\Contracts\Validation\Validator
      */
     private function validatePdf(Request $request): ?array
     {
+        $lang = $request->language ?? 'en';
+
         $rules = [
             'resource_file' => 'mimes:pdf|max:10240',
         ];
         $messages = [
-            'resource_file.mimes' => 'The file must be a PDF.',
-            'resource_file.max' => 'The PDF must not exceed 10MB.',
+            'resource_file.mimes' => trans('message.errors.resource_file_pdf_mimes', [], $lang),
+            'resource_file.max' => trans('message.errors.resource_file_pdf_max', [], $lang),
         ];
 
         return $this->validateRequest($request->all(), $rules, $messages);
@@ -61,12 +80,14 @@ class UploadFileService
      */
     private function validateAudio(Request $request): ?array
     {
+        $lang = $request->language ?? 'en';
+
         $rules = [
             'resource_file' => 'mimes:mp3,wav|max:10240',
         ];
         $messages = [
-            'resource_file.mimes' => 'Audio file must be an MP3 or WAV format.',
-            'resource_file.max' => 'Audio file must not exceed 10MB.',
+            'resource_file.mimes' => trans('message.errors.resource_file_audio_mimes', [], $lang),
+            'resource_file.max' => trans('message.errors.resource_file_audio_max', [], $lang),
         ];
 
         return $this->validateRequest($request->all(), $rules, $messages);
@@ -96,20 +117,13 @@ class UploadFileService
     private function getPath(Request $request, int $id): string
     {
         $type = (int) $request->resource_type;
-        switch ($type) {
-            case 1:
-                $path = "/uploadassets/resources/pdf/{$id}/";
-                break;
 
-            case 2:
-                $path = "/uploadassets/resources/audio/{$id}/";
-                break;
+        $paths = [
+            1 => "/uploadassets/resources/pdf/{$id}/",
+            2 => "/uploadassets/resources/audio/{$id}/",
+        ];
 
-            default:
-                $path = '/uploadassets/resources/';
-                break;
-        }
-        return $path;
+        return $paths[$type] ?? '/uploadassets/resources/';
     }
     /**
      * Handles profile image upload and stores the file path in the user table.
@@ -124,9 +138,10 @@ class UploadFileService
     {
         $path = $this->getPath($request, $topicId);
         $this->createDirectoryIfNotExists($path);
-        if ($request->resource_file) {
-            $file = $request->resource_file;
 
+        $file = $request->resource_file ?? null;
+
+        if ($file) {
             $filePath = $this->uploadFile($file, $path, 'resource_');
             ModuleResourceTopic::where('id', $topicId)->update([
                 'resource_path' => $filePath,
@@ -144,8 +159,19 @@ class UploadFileService
     {
         $fullPath = public_path($path);
 
-        if (! File::exists($fullPath)) {
-            File::makeDirectory($fullPath, 0775, true);
+        $this->ensureDirectory($fullPath);
+    }
+    /**
+     * Ensure that the given directory exists. If it doesn't, create it with proper permissions.
+     *
+     * @param string $path The full path of the directory to check or create.
+     *
+     * @return void
+     */
+    private function ensureDirectory(string $path): void
+    {
+        if (! File::exists($path)) {
+            File::makeDirectory($path, 0775, true);
         }
     }
     /**
@@ -163,5 +189,27 @@ class UploadFileService
         $file->move(public_path($path), $fileName);
 
         return $path . $fileName;
+    }
+    /**
+     * Handles logo image upload and stores the file path in the user table.
+     *
+     * @param \Illuminate\Http\Request $request The incoming HTTP request containing the file.
+     * @param int $settingId The settings ID for building the upload logo path.
+     *
+     * @return void
+     */
+    private function updateLogo(Request $request, int $settingId): void
+    {
+        $path = "/uploadassets/settings/logo/{$settingId}/";
+        $this->createDirectoryIfNotExists($path);
+
+        $file = $request->logo ?? null;
+
+        if ($file) {
+            $filePath = $this->uploadFile($file, $path, 'logo_');
+            Settings::where('id', $settingId)->update([
+                'logo' => $filePath,
+            ]);
+        }
     }
 }

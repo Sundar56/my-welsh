@@ -24,6 +24,7 @@ return new class extends Migration
             $table->enum('fee_type', ['0', '1', '2'])
                 ->default('0')
                 ->comment('0 - default, 1 - month, 2 - annual');
+            $table->tinyInteger('expiry_mail')->default(0);
             $table->timestamps();
         });
     }

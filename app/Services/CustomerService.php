@@ -6,6 +6,7 @@ namespace App\Services;
 
 use App\Api\Admin\Modules\Resources\Models\Resources;
 use App\Api\Teacher\Modules\Signup\Models\BillingEmail;
+use App\Api\Teacher\Modules\Signup\Models\BillingInvoiceUsers;
 use App\Models\User;
 use App\Models\UserSubscription;
 use App\Traits\ApiResponse;
@@ -45,8 +46,9 @@ class CustomerService
                 return $this->validationErrorResponse($validationErrors);
             }
             $this->createCustomers($request);
+            $lang = $request->language ?? 'en';
 
-            return $this->successResponse(null, 'Customer created successfully');
+            return $this->successResponse(null, trans('message.success.add_customer', [], $lang));
         });
     }
     /**
@@ -62,7 +64,7 @@ class CustomerService
         $isTrail = (bool) $request->is_trail;
         $password = Str::random(10);
         $roleId = $request->user_type;
-
+        $lang = $request->language ?? 'en';
         $data = $this->prepareUserData($request, $password);
         $user = $this->loginService->createUserFromRequest(
             $data,
@@ -71,7 +73,7 @@ class CustomerService
         );
         $this->assignRoleToUser($user, (int) $roleId);
         $this->handleUserSubscriptionAndTrial($request, $user->id, $isTrail);
-        $this->sendUserEmail($request->email, $password, 'newuser');
+        $this->sendUserEmail($request->email, $password, 'newuser', $lang, null);
 
         return $user;
     }
@@ -94,9 +96,10 @@ class CustomerService
             if ($request->filled('search')) {
                 $this->applySearchFilters($query, $request->input('search'));
             }
-            $data = $this->paginateAndCustomersList($query, $request);
+            $lang = $request->query('language_code', 'en');
+            $data = $this->paginateAndCustomersList($query, $request, $lang);
 
-            return $this->successResponse($data, 'Customer listing');
+            return $this->successResponse($data, trans('message.success.customer_list', [], $lang));
         });
     }
     /**
@@ -112,7 +115,9 @@ class CustomerService
             $customerId = $this->decryptedValues($request->customer_id);
             $customer = $this->customerInfo($customerId);
 
-            return $this->successResponse($customer, 'Customer details');
+            $lang = $request->language ?? 'en';
+
+            return $this->successResponse($customer, trans('message.success.view_customer', [], $lang));
         });
     }
     /**
@@ -131,8 +136,9 @@ class CustomerService
                 return $this->validationErrorResponse($validationErrors);
             }
             $this->updateCustomers($request, $customerId);
+            $lang = $request->language ?? 'en';
 
-            return $this->successResponse(null, 'Customer details updated successfully');
+            return $this->successResponse(null, trans('message.success.edit_customer', [], $lang));
         });
     }
     /**
@@ -185,31 +191,95 @@ class CustomerService
     {
         return $this->runInTransaction(function () use ($request) {
             $userId = $this->decryptedValues($request->customer_id);
-            User::where('id', $userId)->update([
-                'is_activated' => $request->is_activated,
-            ]);
+            $lang = $request->language ?? 'en';
+            $isActivated = $request->is_activated;
+            $user = $this->getUserById($userId);
+            if (! $user) {
+                return $this->failedResponse(trans('message.login_val.username.exists', [], $lang));
+            }
+            $user->update(['is_activated' => $isActivated]);
+            $this->sendUserEmail($user->email, null, 'activate', $lang, null);
 
-            return $this->successResponse(null, 'User activated successflly');
+            return $this->successResponse(null, trans('message.success.account_activate', [], $lang));
         });
     }
     /**
      * Retrieve all billing emails with encrypted IDs.
      *
+     * @param Request $request
+     *
      * @return array A success response containing the list of billing emails.
      */
-    public function getBillingEmails(): ?array
+    public function getBillingEmails($request): ?array
     {
-        return $this->runInTransaction(function () {
-            $billingEmails = BillingEmail::select('id', 'invoice_email')->get();
+        return $this->runInTransaction(function () use ($request) {
+            [$page, $perPage, $orderColumn, $orderDirection] = $this->getPaginationParam($request);
+            $query = BillingEmail::select('id', 'invoice_email');
+            $paginated = $query->orderBy($orderColumn, $orderDirection)
+                ->paginate($perPage, ['*'], 'page', $page);
+            $lang = $request->language ?? 'en';
+            $data = collect($paginated->items())->map(function ($billingEmail) {
+                return $this->mapBillingEmailData($billingEmail);
+            })->toArray();
 
-            $result = $billingEmails->map(function ($billingEmail) {
-                return [
-                    'invoiceId' => $this->encryptedValues($billingEmail->id),
-                    'invoiceEmail' => $billingEmail->invoice_email,
-                ];
-            });
+            return $this->successResponse([
+                'list' => $data,
+                'currentPage' => $paginated->currentPage(),
+                'totalPages' => $paginated->lastPage(),
+                'recordsTotal' => $paginated->total(),
+            ], trans('message.success.billing_list', [], $lang));
+        });
+    }
+    /**
+     * Handles activate user for BACS payment method users
+     *
+     * @param Request $request
+     *
+     * @return array
+     */
+    public function activateCustomers(Request $request): ?array
+    {
+        return $this->runInTransaction(function () use ($request) {
+            $userIds = $request->customer_id;
+            $isActivated = $request->is_activated;
+            foreach ($userIds as $userId) {
+                $decryptedId = $this->decryptedValues($userId);
+                $user = $this->getUserById($decryptedId);
 
-            return $this->successResponse($result, 'Billing email listing');
+                if ($user) {
+                    $user->update(['is_activated' => $isActivated]);
+
+                    $this->sendUserEmail($user->email, null, 'activate', 'en', null);
+                }
+            }
+            return $this->successResponse(null, 'User activated successflly');
+        });
+    }
+    /**
+     * Handle BACS customer listing based on billing invoice.
+     *
+     * @param Request $request
+     *
+     * @return array
+     */
+    public function bacsCustomerList(Request $request)
+    {
+        return $this->runInTransaction(function () use ($request) {
+            $validation = $this->validateCustomersList($request);
+            if ($validation) {
+                return $this->validationErrorResponse($validation);
+            }
+            $invoiceId = $this->decryptedValues($request->invoice_id);
+            $userIds = $this->getUserIdsByInvoice($invoiceId);
+            $usersQuery = $this->getBacsCustomersQuery($userIds);
+
+            if ($request->filled('search')) {
+                $this->applySearchFilters($usersQuery, $request->input('search'));
+            }
+            $lang = $request->language ?? 'en';
+            $data = $this->paginateAndCustomersList($usersQuery, $request, $lang);
+
+            return $this->successResponse($data, trans('message.success.bacs_customer_list', [], $lang));
         });
     }
     /**
@@ -229,8 +299,15 @@ class CustomerService
         if ($isTrail) {
             $this->subscriptionService->buildTrailHistory($userId, $resourceId);
         } else {
-            $this->subscriptionService->buildSubscriptionHistory($type['id'], $resourceId);
+            $this->buildSubscriptionHistory($type['id'], $resourceId);
         }
+    }
+    private function mapBillingEmailData($billingEmail): array
+    {
+        return [
+            'invoiceId' => $this->encryptedValues($billingEmail->id),
+            'invoiceEmail' => $billingEmail->invoice_email,
+        ];
     }
     /**
      * Prepare user data from the request for user creation.
@@ -246,8 +323,8 @@ class CustomerService
             'email' => $request->email,
             'name' => $request->name,
             'password' => Hash::make($password),
-            'payment_type' => '0',
-            'language_code' => (int) $request->language_code,
+            'payment_type' => UserSubscription::CARD,
+            'language_code' => $this->getLanguageCodeValue($request->language_code),
             'isCustomer' => (int) $request->is_customer,
             'isActivated' => UserSubscription::STATUS_ONE,
         ];
@@ -268,13 +345,8 @@ class CustomerService
             ],
             'name' => 'required',
         ];
-
-        $messages = [
-            'email.required' => 'Email is required',
-            'email.email' => 'Enter a valid email',
-            'email.unique' => 'Email already exists',
-            'name.required' => 'Organisation Name is required',
-        ];
+        $lang = $request->language ?? 'en';
+        $messages = trans('message.customer_val', [], $lang);
 
         return $this->validateRequest($request->all(), $rules, $messages);
     }
@@ -340,18 +412,19 @@ class CustomerService
      *
      * @param \Illuminate\Database\Eloquent\Builder $query
      * @param Request $request
+     * @param string $lang
      *
      * @return array|null
      */
-    private function paginateAndCustomersList($query, Request $request): ?array
+    private function paginateAndCustomersList($query, Request $request, string $lang): ?array
     {
         [$page, $perPage, $orderColumn, $orderDirection] = $this->getPaginationParams($request);
 
         $paginated = $query->orderBy($orderColumn, $orderDirection)
             ->paginate($perPage, ['*'], 'page', $page);
 
-        $data = collect($paginated->items())->map(function ($item) {
-            return $this->mapCustomerData($item);
+        $data = collect($paginated->items())->map(function ($item) use ($lang) {
+            return $this->mapCustomerData($item, $lang);
         })->toArray();
 
         return [
@@ -371,7 +444,7 @@ class CustomerService
      *
      * @return array         An array containing the customer's formatted data.
      */
-    private function mapCustomerData($item): array
+    private function mapCustomerData($item, string $lang): array
     {
         return [
             'encryptedId' => Crypt::encrypt($item->id),
@@ -379,9 +452,24 @@ class CustomerService
             'customerName' => $item->name,
             'isActivated' => $item->is_activated,
             'resourceName' => $item->resourceName,
-            'status' => $item->paymentStatus === UserSubscription::STATUS_ONE ? 'Paid' : 'Awaiting Payment',
+            'status' => $this->getTranslatedStatus($item->paymentStatus, $lang),
         ];
     }
+    /**
+     * Get the translated payment status based on the given language.
+     *
+     * @param int $status The numeric payment status (e.g., 1 for paid).
+     * @param string $lang The language code (e.g., 'en' or 'cy').
+     *
+     * @return string Translated payment status.
+     */
+    private function getTranslatedStatus($status, string $lang): string
+    {
+        return $status === UserSubscription::STATUS_ONE
+            ? trans('message.customers.paid', [], $lang)
+            : trans('message.customers.awaiting_payment', [], $lang);
+    }
+
     /**
      * Extracts and validates pagination and ordering parameters from the request.
      *
@@ -408,6 +496,22 @@ class CustomerService
         return [$page, $perPage, $orderColumn, $orderDirection];
     }
     /**
+     * Extracts and validates pagination and ordering parameters from the request.
+     *
+     * @param Request $request
+     *
+     * @return array [$page, $perPage, $orderColumn, $orderDirection]
+     */
+    private function getPaginationParam(Request $request): array
+    {
+        $page = (int) $request->get('page', 1);
+        $perPage = (int) $request->get('per_page', 10);
+        $orderColumn = $request->get('order_column', 'id');
+        $orderDirection = $request->get('order_direction', 'desc');
+
+        return [$page, $perPage, $orderColumn, $orderDirection];
+    }
+    /**
      * Builds and returns the base customer query with optional role or type filters.
      *
      * @param Request $request
@@ -422,6 +526,40 @@ class CustomerService
         })
             ->leftJoin('learning_resources as resources', 'user_subscription.resource_id', '=', 'resources.id')
             ->where('users.payment_type', UserSubscription::BACS)
+            ->select(
+                'users.*',
+                'resources.resource_name as resourceName',
+                'user_subscription.status as paymentStatus'
+            );
+    }
+    /**
+     * Retrieve user IDs associated with a given billing invoice ID.
+     *
+     * @param int|string $invoiceId The decrypted billing invoice ID.
+     *
+     * @return array The array of user IDs linked to the invoice.
+     */
+    private function getUserIdsByInvoice($invoiceId): array
+    {
+        return BillingInvoiceUsers::where('billing_invoice_id', $invoiceId)
+            ->pluck('user_id')
+            ->toArray();
+    }
+    /**
+     * Builds the query to retrieve BACS customers by an array of user IDs.
+     *
+     * @param array $userIds An array of user IDs to filter the BACS customers.
+     *
+     * @return \Illuminate\Database\Query\Builder|\Illuminate\Database\Eloquent\Builder The query builder instance.
+     */
+    private function getBacsCustomersQuery(array $userIds)
+    {
+        return User::leftJoin('user_subscription', function ($join) {
+            $join->on('user_subscription.user_id', '=', 'users.id')
+                ->where('user_subscription.latest_subscription', UserSubscription::STATUS_ONE);
+        })
+            ->leftJoin('learning_resources as resources', 'user_subscription.resource_id', '=', 'resources.id')
+            ->whereIn('users.id', $userIds)
             ->select(
                 'users.*',
                 'resources.resource_name as resourceName',

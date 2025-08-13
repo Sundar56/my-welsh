@@ -4,7 +4,9 @@ declare(strict_types=1);
 
 namespace App\Services;
 
+use App\Api\Admin\Modules\Resources\Models\ModuleResources;
 use App\Api\Admin\Modules\Resources\Models\ModuleResourceTopic;
+use App\Api\Parent\Modules\Signup\Models\ParentPlaylists;
 use App\Api\Teacher\Modules\Playlists\Models\Playlist;
 use App\Api\Teacher\Modules\Playlists\Models\PlaylistResource;
 use App\Traits\ApiResponse;
@@ -34,22 +36,27 @@ class PlaylistService
             $topicsWithPosition = $this->getTopicIds($request->topic_ids, $request->position);
             $this->addTopicsToPlaylist($playlist['id'], $topicsWithPosition);
 
-            return $this->successResponse(null, 'Playlist created successfully');
+            $lang = $request->language ?? 'en';
+            return $this->successResponse(null, trans('message.success.playlist_created', [], $lang));
         });
     }
     /**
      * Handle to view playlist based on resources.
      *
      * @param Request $request
+     * @param string $type
      *
      * @return array
      */
-    public function viewPlaylist(Request $request)
+    public function viewPlaylist(Request $request, string $type = 'user'): array
     {
-        return $this->runInTransaction(function () use ($request) {
-            $playlistInfo = $this->playlistInfo($request);
+        return $this->runInTransaction(function () use ($request, $type) {
+            $playlistInfo = $this->playlistInfo($request, $type);
+
             $data = $playlistInfo['playlistData'];
-            return $this->successResponse($data, 'Playlist Data');
+            $lang = $request->query('language', 'en');
+
+            return $this->successResponse($data, trans('message.success.playlist_data', [], $lang));
         });
     }
     /**
@@ -75,20 +82,21 @@ class PlaylistService
         ];
     }
     /**
-     * Create a new playlist.
+     * View playlist.
      *
      * @param \Illuminate\Http\Request $request
+     * @param string $type
      *
      * @return array
      */
-    public function playlistInfo($request): ?array
+    public function playlistInfo(Request $request, string $type = 'user'): ?array
     {
         $userId = $this->getUserIdFromToken($request);
-        $playlists = Playlist::where('user_id', $userId)
-            ->get(['id', 'playlist_name', 'resource_id']);
-
+        $playlists = match ($type) {
+            'parent' => $this->getParentPlaylists($userId),
+            default => $this->getUserPlaylists($userId),
+        };
         $result = [];
-
         foreach ($playlists as $playlist) {
             $topicDetails = $this->getTopicDetailsByPlaylistId($playlist->id);
             $result[] = [
@@ -98,7 +106,6 @@ class PlaylistService
                 'topics' => $topicDetails,
             ];
         }
-
         return [
             'playlistData' => $result,
         ];
@@ -116,7 +123,8 @@ class PlaylistService
             $playlistId = $this->decryptedValues($request->playlist_id);
             $playlist = Playlist::where('id', $playlistId)->select('playlist_name')->first();
             if (! $playlist) {
-                return $this->failedResponse('Playlist not found');
+                $lang = $request->language_code ?? 'en';
+                return $this->failedResponse(trans('message.errors.playlist_not_found', [], $lang));
             }
             $topicDetails = $this->getTopicDetailsByPlaylistId($playlistId);
 
@@ -124,8 +132,9 @@ class PlaylistService
                 'playlist_name' => $playlist->playlist_name,
                 'topics' => $topicDetails,
             ];
+            $lang = $request->language ?? 'en';
 
-            return $this->successResponse($result, 'Playlist Data');
+            return $this->successResponse($result, trans('message.success.playlist_data', [], $lang));
         });
     }
     /**
@@ -141,11 +150,14 @@ class PlaylistService
             $playlist = $this->getValidPlaylist($request);
 
             if (! $playlist) {
-                return $this->failedResponse('Playlist not found');
+                $lang = $request->language_code ?? 'en';
+                return $this->failedResponse(trans('message.errors.playlist_not_found', [], $lang));
             }
             $playlist->delete();
 
-            return $this->successResponse(null, 'Playlist deleted successfully');
+            $lang = $request->language ?? 'en';
+
+            return $this->successResponse(null, trans('message.success.playlist_deleted', [], $lang));
         });
     }
     /**
@@ -160,11 +172,14 @@ class PlaylistService
         return $this->runInTransaction(function () use ($request) {
             $playlist = $this->getValidPlaylist($request);
             if (! $playlist) {
-                return $this->failedResponse('Playlist not found');
+                $lang = $request->language_code ?? 'en';
+                return $this->failedResponse(trans('message.errors.playlist_not_found', [], $lang));
             }
+            $userId = $this->getUserIdFromToken($request);
+            $data = $this->buildQrCodeForPlaylist($request->playlist_id, $userId);
+            $lang = $request->language ?? 'en';
 
-            $data = $this->buildQrCodeForPlaylist($request->playlist_id);
-            return $this->successResponse($data, 'Share playlist');
+            return $this->successResponse($data, trans('message.success.playlist_shared', [], $lang));
         });
     }
     /**
@@ -186,30 +201,44 @@ class PlaylistService
             $topicsWithPosition = $this->getTopicIds($request->topic_ids, $request->position);
             $this->deleteTopicsFromPlaylist($playlistId);
             $this->addTopicsToPlaylist($playlistId, $topicsWithPosition);
+            $lang = $request->language ?? 'en';
 
-            return $this->successResponse(null, 'Playlist updated successfully');
+            return $this->successResponse(null, trans('message.success.playlist_updated', [], $lang));
         });
     }
     /**
      * Build QR code and URL data for a given playlist ID.
      *
      * @param string $encryptedPlaylistId  The encrypted playlist ID used for URL generation.
+     * @param int $userId  The user ID used for URL generation.
      *
      * @return array
      */
-    protected function buildQrCodeForPlaylist(string $encryptedPlaylistId): array
+    protected function buildQrCodeForPlaylist(string $encryptedPlaylistId, int $userId): array
     {
         $baseUrl = env('FRONT_END_URL');
-        $url = $baseUrl . '/playlists/' . $encryptedPlaylistId;
-        $qrCode = QrCode::format('svg')->size(200)->generate($url);
+        $parentUrl = env('PARENT_LOGIN_URL');
+        $encryptedUserId = $this->encryptedValues($userId);
+        $expiryTimestamp = now()->addDays(30)->timestamp;
+        $encryptedExpiry = $this->encryptedValues($expiryTimestamp);
+        $url = "{$baseUrl}/{$parentUrl}/";
+        $playlistIdUrl = $url . '?id=' . $encryptedUserId . '&playlistId=' . $encryptedPlaylistId . '&exp=' . $encryptedExpiry;
+        $qrCode = QrCode::format('svg')->size(200)->generate($playlistIdUrl);
         $base64Qr = 'data:image/svg+xml;base64,' . base64_encode((string) $qrCode);
 
         return [
             'playlist_id' => $encryptedPlaylistId,
-            'url' => $url,
+            'url' => $playlistIdUrl,
             'qr_code' => $base64Qr,
         ];
     }
+    /**
+     * Retrieves and validates a playlist from the given request.
+     *
+     * @param \Illuminate\Http\Request $request The incoming HTTP request containing playlist identification data.
+     *
+     * @return \App\Models\Playlist|null The valid Playlist instance or null if not found or invalid.
+     */
     protected function getValidPlaylist(Request $request): ?Playlist
     {
         try {
@@ -220,6 +249,35 @@ class PlaylistService
 
         return Playlist::find($playlistId);
     }
+    /**
+     * Get playlists for a regular user.
+     *
+     * @param int $userId
+     *
+     * @return \Illuminate\Support\Collection
+     */
+    private function getUserPlaylists(int $userId)
+    {
+        return Playlist::where('user_id', $userId)
+            ->get(['id', 'playlist_name', 'resource_id']);
+    }
+
+    /**
+     * Get playlists for a parent user.
+     *
+     * @param int $userId
+     *
+     * @return \Illuminate\Support\Collection
+     */
+    private function getParentPlaylists(int $userId)
+    {
+        $parentPlaylists = ParentPlaylists::where('parent_id', $userId)
+            ->pluck('playlist_id');
+
+        return Playlist::whereIn('id', $parentPlaylists)
+            ->get(['id', 'playlist_name', 'resource_id']);
+    }
+
     /**
      * Add multiple topics to the given playlist.
      *
@@ -238,7 +296,6 @@ class PlaylistService
             ]);
         }
     }
-
     /**
      * Ensure topic IDs are returned as an array.
      *
@@ -276,12 +333,12 @@ class PlaylistService
      */
     private function validatePlaylist(Request $request): ?array
     {
+        $lang = $request->language ?? 'en';
+
         $rules = [
             'playlist_name' => 'required',
         ];
-        $messages = [
-            'playlist_name.required' => 'Playlist Name is required',
-        ];
+        $messages = trans('message.errors', [], $lang);
 
         return $this->validateRequest($request->all(), $rules, $messages);
     }
@@ -295,22 +352,65 @@ class PlaylistService
     private function getTopicDetailsByPlaylistId(int $playlistId): array
     {
         $playlistResources = $this->getPlaylistResourcesWithPosition($playlistId);
+        return $this->formatTopicsWithModules($playlistResources);
+    }
+    /**
+     * Formats playlist resources by retrieving associated topics and their module names.
+     *
+     * @param \Illuminate\Support\Collection $playlistResources  The playlist resources with positions.
+     *
+     * @return array  Formatted list of topic details with module names and positions.
+     */
+    private function formatTopicsWithModules($playlistResources): array
+    {
         $topicIds = $playlistResources->pluck('module_resource_topic_id')->toArray();
         $topics = ModuleResourceTopic::whereIn('id', $topicIds)->get()->keyBy('id');
+
+        $moduleResourceIds = $topics->pluck('module_resource_id')->unique()->toArray();
+        $modules = ModuleResources::whereIn('id', $moduleResourceIds)
+            ->pluck('module_name', 'id');
+
+        return $this->mapPlaylistResourcesToTopics($playlistResources, $topics, $modules);
+    }
+    /**
+     * Maps playlist resources to their corresponding topic data.
+     *
+     * @param \Illuminate\Support\Collection $playlistResources  The playlist resources with positions.
+     * @param \Illuminate\Support\Collection $topics             The topics keyed by ID.
+     * @param \Illuminate\Support\Collection $modules            Module names keyed by module resource ID.
+     *
+     * @return array  Mapped list of topic data including module names and positions.
+     */
+    private function mapPlaylistResourcesToTopics($playlistResources, $topics, $modules): array
+    {
         $result = [];
 
         foreach ($playlistResources as $resource) {
             $topic = $topics->get($resource->module_resource_topic_id);
+
             if ($topic) {
-                $topicArray = $topic->toArray();
-                $topicArray['id'] = $this->encryptedValues($topic->id);
-                $result[] = array_merge(
-                    $topicArray,
-                    ['position' => $resource->position]
-                );
+                $result[] = $this->buildTopicData($topic, $resource->position, $modules);
             }
         }
+
         return $result;
+    }
+    /**
+     * Builds a formatted topic array with encrypted ID, module name, and position.
+     *
+     * @param \App\Models\ModuleResourceTopic $topic  The topic model instance.
+     * @param int $position                           The position of the topic in the playlist.
+     * @param \Illuminate\Support\Collection $modules Module names keyed by module resource ID.
+     *
+     * @return array  Formatted topic data.
+     */
+    private function buildTopicData($topic, int $position, $modules): array
+    {
+        $topicArray = $topic->toArray();
+        $topicArray['id'] = $this->encryptedValues($topic->id);
+        $topicArray['module_name'] = $modules[$topic->module_resource_id] ?? null;
+
+        return array_merge($topicArray, ['position' => $position]);
     }
     /**
      * Get playlist resources with topic ID and position.

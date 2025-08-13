@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Services;
 
 use App\Api\Teacher\Modules\Signup\Models\StripeWebhooks;
+use App\Models\User;
 use App\Models\UserPayments;
 use App\Models\UserSubscription;
 use App\Traits\ApiResponse;
@@ -26,15 +27,18 @@ class StripeWebhookService
      */
     public function initializeStripeWebhookContext(Request $request): array
     {
+        $settings = $this->getSuperadminSettings();
+        $webhookKey = $settings['webhookkey'] ?? config('services.stripe.webhook_secret');
+
         return [
             'statusCode' => 400,
             'responsecode' => 0,
             'stripelogEnabled' => (int) env('STRIPE_LOG', 0),
             'currentMethod' => strtolower($request->method()),
-            'payload' => @file_get_contents('php://input'),
-            'payloadresponse' => json_decode(@file_get_contents('php://input'), true),
-            'endpoint_secret' => config('services.stripe.webhook_secret'),
-            'sig_header' => $_SERVER['HTTP_STRIPE_SIGNATURE'] ?? '',
+            'payload' => $request->getContent(),
+            'payloadresponse' => json_decode($request->getContent(), true),
+            'endpoint_secret' => $webhookKey,
+            'sig_header' => $request->header('Stripe-Signature', ''),
             'event' => null,
         ];
     }
@@ -70,20 +74,14 @@ class StripeWebhookService
     {
         try {
             $event = $this->constructStripeEvent($payload, $sigHeader, $endpointSecret);
-            if (empty($event->data)) {
-                if ($logEnabled) {
-                    Log::channel('webhooks')->info("Stripe empty data \n");
-                }
-                return response(['error' => 'Invalid webhook'], 400);
+
+            if ($this->isEmptyEvent($event)) {
+                return $this->handleEmptyEvent($logEnabled);
             }
 
             return $this->processStripeEvent($event, $logEnabled);
-        } catch (\UnexpectedValueException $e) {
-            return $this->handleStripeException($e, 'Invalid payload', 'invalidPayloadErr', 400, $logEnabled);
-        } catch (\Stripe\Exception\SignatureVerificationException $e) {
-            return $this->handleStripeException($e, 'Invalid signature', 'invalidSigErr', 400, $logEnabled);
-        } catch (\Exception $e) {
-            return $this->handleStripeException($e, 'Enter stripe general error', 'error', 500, $logEnabled);
+        } catch (\Throwable $e) {
+            return $this->resolveStripeExceptionResponse($e, $logEnabled);
         }
     }
     /**
@@ -114,26 +112,20 @@ class StripeWebhookService
      *
      * @return void
      */
-    public function logEventData($eventType, $event): void
+    public function logEventData(string $eventType, $event): void
     {
-        Log::channel('webhooks')->info("::::::::::::::::::::::::::::::::::::::::::::::::::\n\n");
-        Log::channel('webhooks')->info("Stripe event:: {$eventType} \n");
-        Log::channel('webhooks')->info("Stripe event print:: {$event} \n");
-        Log::channel('webhooks')->info(":::::::::::::::::::::::::::::::::::::::::::::::::::\n\n");
+        $this->logToWebhookChannel("Stripe event: {$eventType}", $event);
     }
     /**
      * Logs Stripe webhook details to the 'webhooks' log channel.
      *
-     * @param array $webhookinputdata           HTTP request method (e.g., "post")
+     * @param array $webhookinputdata      HTTP request method (e.g., "post")
      *
      * @return void
      */
     public function logWebhookinputdata(?array $webhookinputdata): void
     {
-        Log::channel('webhooks')->info("::::::::::::::::::::::::::::::::::::::::::::::::::\n\n");
-        Log::channel('webhooks')->info('Webhook inputdata data:');
-        Log::channel('webhooks')->info(print_r($webhookinputdata, true));
-        Log::channel('webhooks')->info(":::::::::::::::::::::::::::::::::::::::::::::::::::\n\n");
+        $this->logToWebhookChannel('Webhook input data', $webhookinputdata);
     }
     /**
      * Builds the array of data for Stripe webhook processing.
@@ -176,20 +168,62 @@ class StripeWebhookService
     public function handlePaymentIntentSucceeded($eventObject): void
     {
         if ($eventObject->status === 'succeeded') {
-            $intentId = $eventObject->id;
-
-            UserPayments::where('intent_id', $intentId)->update([
-                'status' => UserSubscription::STATUS_ONE,
-            ]);
-
-            $user = UserPayments::where('intent_id', $intentId)->select('user_id')->first();
-
-            if ($user) {
-                UserSubscription::where('user_id', $user->user_id)->update([
-                    'status' => UserSubscription::STATUS_ONE,
+            $userPayment = UserPayments::where('intent_id', $eventObject->id)->first();
+            $userPayment->update(['status' => UserSubscription::BACS]);
+            $userId = $userPayment->user_id;
+            if ($userId) {
+                UserSubscription::where('user_id', $userId)->update([
+                    'status' => UserSubscription::BACS,
                 ]);
+                User::where('id', $userId)->update([
+                    'is_activated' => UserSubscription::BACS,
+                ]);
+
+                $user = $this->getUserById($userId);
+                $this->sendUserEmail($user->email, null, 'activate', 'en', null);
             }
         }
+    }
+    /**
+     * Logs structured data to the 'webhooks' log channel with a title.
+     *
+     * @param string $title  A short descriptive title or label for the log entry.
+     * @param mixed  $data   The data to log (can be an array, object, or string).
+     *
+     * @return void
+     */
+    protected function logToWebhookChannel(string $title, $data): void
+    {
+        Log::channel('webhooks')->info("::::::::::::::::::::::::::::::::::::::::::::::::::\n");
+        Log::channel('webhooks')->info($title);
+        Log::channel('webhooks')->info(print_r($data, true));
+        Log::channel('webhooks')->info("::::::::::::::::::::::::::::::::::::::::::::::::::\n");
+    }
+    /**
+     * Check if the Stripe event data is empty.
+     *
+     * @param \Stripe\Event $event
+     *
+     * @return bool
+     */
+    private function isEmptyEvent($event): bool
+    {
+        return ! isset($event->data) || $event->data === null || $event->data === [];
+    }
+    /**
+     * Handle an empty Stripe event response.
+     *
+     * @param int $logEnabled
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    private function handleEmptyEvent(int $logEnabled)
+    {
+        if ($logEnabled) {
+            Log::channel('webhooks')->info("Stripe empty data \n");
+        }
+
+        return response(['error' => 'Invalid webhook'], 400);
     }
     /**
      * Construct and validate the Stripe event.
@@ -203,17 +237,13 @@ class StripeWebhookService
      */
     private function processStripeEvent(\Stripe\Event $event, int $logEnabled)
     {
-        if ($logEnabled) {
-            Log::channel('webhooks')->info('Stripe data:: ' . json_encode($event->data) . " \n");
-        }
         $created_at = Carbon::now();
         $eventObject = $event->data->object;
         $eventRequest = $event->request;
-        if ($logEnabled === 1) {
-            $this->logEventData($event->type, $event);
-        }
         $webhookInputData = $this->buildWebhookInputData($event, $eventRequest, $eventObject, $created_at);
-        if ($logEnabled === 1) {
+        if ($logEnabled) {
+            Log::channel('webhooks')->info('Stripe data:: ' . json_encode($event->data) . " \n");
+            $this->logEventData($event->type, $event);
             $this->logWebhookinputdata($webhookInputData);
         }
         StripeWebhooks::storeWebhookHistory($webhookInputData);
@@ -221,5 +251,23 @@ class StripeWebhookService
             $this->handlePaymentIntentSucceeded($eventObject);
         }
         return response(['message' => 'Webhook processed for ' . $event->type], 200);
+    }
+    /**
+     * Determine the appropriate response based on the Stripe exception type.
+     *
+     * @param \Throwable $e The exception thrown.
+     * @param int $logEnabled Flag indicating if logging is enabled.
+     *
+     * @return \Illuminate\Http\JsonResponse
+     */
+    private function resolveStripeExceptionResponse(\Throwable $e, int $logEnabled)
+    {
+        return match (true) {
+            $e instanceof \UnexpectedValueException => $this->handleStripeException($e, 'Invalid payload', 'invalidPayloadErr', 400, $logEnabled),
+
+            $e instanceof \Stripe\Exception\SignatureVerificationException => $this->handleStripeException($e, 'Invalid signature', 'invalidSigErr', 400, $logEnabled),
+
+            default => $this->handleStripeException($e, 'Enter stripe general error', 'error', 500, $logEnabled),
+        };
     }
 }

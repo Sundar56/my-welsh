@@ -41,8 +41,12 @@ class SendNotificationMail extends Mailable
      */
     public function content(): Content
     {
+        $view = $this->data['lang'] === 'cy'
+            ? 'emails.passwordnotify_cy'
+            : 'emails.passwordnotify';
+
         return new Content(
-            view: 'emails.passwordnotify',
+            view: $view,
             with: [
                 'data' => $this->data,
             ],

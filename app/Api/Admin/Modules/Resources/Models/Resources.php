@@ -11,6 +11,8 @@ class Resources extends Model
 {
     use HasFactory;
 
+    public const DEFAULT = '0';
+
     protected $table = 'learning_resources';
 
     protected $fillable = [
@@ -18,5 +20,6 @@ class Resources extends Model
         'monthly_fee',
         'annual_fee',
         'resource_reference',
+        'type',
     ];
 }

@@ -31,9 +31,10 @@ class SettingsController extends BaseController
     {
         $userId = $this->getUserIdFromToken($request);
         $roleId = $this->getRoleIdFromToken($request);
+        $lang = $request->query('language', 'en');
 
         return $this->handleServiceResponse(
-            $this->userSettingServcie->userViewProfile($userId, $roleId)
+            $this->userSettingServcie->userViewProfile($userId, $roleId, $lang)
         );
     }
     /**

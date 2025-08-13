@@ -24,6 +24,7 @@ return new class extends Migration
             $table->date('trail_end_date');
             $table->string('trail_expired_at')->nullable();
             $table->tinyInteger('status')->default(0);
+            $table->tinyInteger('expiry_mail')->default(0);
             $table->timestamps();
         });
     }

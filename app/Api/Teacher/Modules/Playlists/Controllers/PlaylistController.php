@@ -43,7 +43,7 @@ class PlaylistController extends BaseController
     public function viewPlaylist(Request $request): JsonResponse
     {
         return $this->handleServiceResponse(
-            $this->playlistService->viewPlaylist($request)
+            $this->playlistService->viewPlaylist($request, 'user')
         );
     }
     /**

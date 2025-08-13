@@ -20,6 +20,7 @@ class ResourceSeeder extends Seeder
                 [
                     'resource_name'      => 'Trail',  
                     'resource_reference' => 'trail',
+                    'type'               => '1',
                     'created_at'         => date('Y-m-d H:i:s'),
                     'updated_at'         => date('Y-m-d H:i:s'),
                 ],

@@ -15,6 +15,7 @@ class UserSubscription extends Model
     public const STATUS_ONE = 1;
     public const CARD = '0';
     public const BACS = '1';
+    public const PARENT = '2';
 
     protected $table = 'user_subscription';
 

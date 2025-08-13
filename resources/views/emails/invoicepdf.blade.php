@@ -60,6 +60,15 @@
 
 <body>
   <div class="invoice-box">
+
+    <div class="email-header" style="text-align: center; margin-bottom: 20px;">
+      @if(!empty($data['pdflogo']))
+      <img src="{{ $data['logo'] }}" alt="School Logo" style="height: 60px;">
+      @else
+      <span style="font-size: 14px; color: #888;">No logo provided</span>
+      @endif
+    </div>
+    
     <h2>Subscription Invoice</h2>
 
     <div style="text-align: right;">

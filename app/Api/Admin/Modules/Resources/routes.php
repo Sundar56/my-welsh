@@ -15,6 +15,7 @@ Route::group([
     Route::get('/admin/getresources', 'ResourceController@getResources')->name('admin.resources.get');
     Route::post('/admin/editresource', 'ResourceController@editResource')->name('admin.resources.edit');
     Route::post('/admin/deletetopic', 'ResourceController@adminDeleteTopic')->name('admin.resources.delete');
+    Route::post('/admin/deletetopicfile', 'ResourceController@deleteTopicFile')->name('admin.resources.deletetopicfile');
 
     Route::get('/admin/getmodulestopic', 'ResourceController@alModulesWithTopics')->name('admin.resources.gettopic');
 });

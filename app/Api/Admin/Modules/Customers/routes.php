@@ -17,4 +17,6 @@ Route::group([
     Route::get('/admin/subscriptiontypes', 'CustomersController@subscriptionTypeList')->name('admin.customers.typelist');
     Route::post('/admin/activation', 'CustomersController@activateCustomer')->name('admin.customers.activate');
     Route::get('/admin/getbillingdata', 'CustomersController@getBillingEmails')->name('admin.customers.getbilling');
+    Route::post('/admin/getbillingusers', 'CustomersController@bacsCustomerList')->name('admin.customers.billingusers');
+    Route::post('/admin/activateuser', 'CustomersController@activateCustomers')->name('admin.customers.activateuser');
 });

@@ -16,5 +16,7 @@ class DatabaseSeeder extends Seeder
         $this->call(RoleSeeder::class);
         $this->call(LanguageSeeder::class);
         $this->call(ModulesSeeder::class);
+        $this->call(ResourceSeeder::class);
+        $this->call(AdminSettings::class);
     }
 }

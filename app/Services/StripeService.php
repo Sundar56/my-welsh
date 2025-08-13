@@ -27,15 +27,11 @@ class StripeService
     public function createCustomers(Request $request, int $userId)
     {
         return $this->runInTransaction(function () use ($request, $userId) {
-            \Stripe\Stripe::setApiKey(config('services.stripe.secret'));
+            $this->setStripeApiKey();
+            // \Stripe\Stripe::setApiKey(config('services.stripe.secret'));
             $requestData = $this->requestData($request);
             $customer = $this->handleCreateCustomer($requestData);
-            $intentId = $request->client_secret_id;
-            Log::channel('webhooks')->info("Storing customer token", [
-                'customer_id' => $customer->id,
-                'user_id' => $userId,
-                'intent_id' => $intentId,
-            ]);
+            $intentId = $request->token;
             $this->storeCustomerToken($customer->id, $userId, $intentId);
             $this->updateApiHistory($request, $customer, 'customer', $requestData, $userId);
 
@@ -52,7 +48,8 @@ class StripeService
     public function createPaymentIntent(Request $request)
     {
         return $this->runInTransaction(function () use ($request) {
-            \Stripe\Stripe::setApiKey(config('services.stripe.secret'));
+            $this->setStripeApiKey();
+            // \Stripe\Stripe::setApiKey(config('services.stripe.secret'));
             $resourceId = $this->decryptedValues($request->resource_id);
             $resource = Resources::select('annual_fee')->where('id', $resourceId)->first();
             $data = $this->storePaymentIntent($request, $resource->annual_fee);
@@ -98,19 +95,19 @@ class StripeService
     {
         return \Stripe\Customer::create([
             'email' => $requestData['email'],
-            'source' => $requestData['token'],
+            // 'source' => $requestData['token'],
         ]);
     }
     /**
      * Stores the Stripe customer token associated with a user.
      *
-     * @param string $customerId  The Stripe customer ID to store.
+     * @param string|null $customerId  The Stripe customer ID to store.
      * @param int $userId         The application's user ID the token is associated with.
-     * @param string $intentId  The Stripe Payment intent ID to store.
+     * @param string|null $intentId  The Stripe Payment intent ID to store.
      *
      * @return void
      */
-    private function storeCustomerToken(string $customerId, int $userId, string $intentId): void
+    private function storeCustomerToken(?string $customerId, int $userId, ?string $intentId): void
     {
         UserPayments::create([
             'user_id' => $userId,
